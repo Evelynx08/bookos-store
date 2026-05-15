@@ -42,3 +42,13 @@ commands.allow = ["download_pkg"]
 identifier = "allow-detect-system-theme"
 description = "Allow detect_system_theme command"
 commands.allow = ["detect_system_theme"]
+
+[[permission]]
+identifier = "allow-get-icon"
+description = "Allow get_icon command"
+commands.allow = ["get_icon"]
+
+[[permission]]
+identifier = "allow-verify-password"
+description = "Allow verify_password command"
+commands.allow = ["verify_password"]

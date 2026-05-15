@@ -16,6 +16,8 @@
     "allow-uninstall-pkg",
     "allow-download-pkg",
     "allow-detect-system-theme",
+    "allow-get-icon",
+    "allow-verify-password",
     "core:default",
     "core:webview:default",
     "core:webview:allow-create-webview-window",

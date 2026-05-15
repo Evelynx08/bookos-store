@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::io::Write;
+use base64::{Engine as _, engine::general_purpose};
 
 /// BookOS app catalog. Each app has: pkgname, label, description, category,
 /// GitHub repo for releases, optional icon URL.
@@ -132,52 +134,97 @@ fn open_release_page(repo: String) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-fn priv_bin() -> &'static str {
-    if Command::new("which").arg("pkexec").output()
-        .map(|o| o.status.success()).unwrap_or(false) { "pkexec" } else { "sudo" }
-}
-
-/// Install a local package file. Backend picks pacman -U or dnf install based
-/// on detected distro. Frontend handles GitHub Releases fetch + download.
-#[tauri::command]
-async fn install_pkg_file(path: String) -> Result<String, String> {
-    if !std::path::Path::new(&path).exists() {
-        return Err(format!("Archivo no existe: {}", path));
+/// Run privileged command. If `password` provided, uses `sudo -S` and feeds it
+/// via stdin (lets the UI render a custom password dialog). If empty, falls
+/// back to pkexec (system polkit dialog).
+fn run_priv(args: &[&str], password: &str) -> Result<String, String> {
+    if password.is_empty() {
+        let bin = if Command::new("which").arg("pkexec").output()
+            .map(|o| o.status.success()).unwrap_or(false) { "pkexec" } else { "sudo" };
+        let out = Command::new(bin).args(args).output()
+            .map_err(|e| format!("Fallo al lanzar {}: {}", bin, e))?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            return Err(format!("Falló: {}", stderr.lines().last().unwrap_or("error")));
+        }
+        return Ok(String::from_utf8_lossy(&out.stdout).to_string());
     }
-    let bin = priv_bin();
-    let args: Vec<&str> = match detect_pm() {
-        Pm::Pacman => vec!["pacman", "-U", "--noconfirm", &path],
-        Pm::Dnf => vec!["dnf", "install", "-y", &path],
-    };
-    let out = Command::new(bin)
-        .args(&args)
-        .output()
-        .map_err(|e| format!("Fallo al lanzar {}: {}", bin, e))?;
+    let mut child = Command::new("sudo")
+        .arg("-S").arg("-p").arg("")
+        .args(args)
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
+        .spawn().map_err(|e| format!("Fallo al lanzar sudo: {}", e))?;
+    if let Some(mut s) = child.stdin.take() {
+        let _ = s.write_all(format!("{}\n", password).as_bytes());
+    }
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
     if !out.status.success() {
-        return Err(format!("Instalación falló: {}\n{}", stderr.lines().last().unwrap_or(""), stdout.lines().last().unwrap_or("")));
+        if stderr.contains("incorrect password") || stderr.contains("Sorry, try again") {
+            return Err("Contraseña incorrecta".into());
+        }
+        return Err(format!("Falló: {}", stderr.lines().last().unwrap_or(stdout.lines().last().unwrap_or("error"))));
     }
     Ok(stdout)
 }
 
+/// Install a local package file. Backend picks pacman -U or dnf install based
+/// on detected distro. If `password` is provided, uses sudo -S (custom dialog);
+/// otherwise pkexec (system dialog).
+#[tauri::command]
+async fn install_pkg_file(path: String, password: Option<String>) -> Result<String, String> {
+    if !std::path::Path::new(&path).exists() {
+        return Err(format!("Archivo no existe: {}", path));
+    }
+    let args: Vec<&str> = match detect_pm() {
+        Pm::Pacman => vec!["pacman", "-U", "--noconfirm", &path],
+        Pm::Dnf => vec!["dnf", "install", "-y", &path],
+    };
+    run_priv(&args, password.as_deref().unwrap_or(""))
+}
+
 /// Uninstall a package via pacman -Rs or dnf remove.
 #[tauri::command]
-async fn uninstall_pkg(pkg: String) -> Result<String, String> {
-    let bin = priv_bin();
+async fn uninstall_pkg(pkg: String, password: Option<String>) -> Result<String, String> {
     let args: Vec<&str> = match detect_pm() {
         Pm::Pacman => vec!["pacman", "-Rs", "--noconfirm", &pkg],
         Pm::Dnf => vec!["dnf", "remove", "-y", &pkg],
     };
-    let out = Command::new(bin)
-        .args(&args)
-        .output()
-        .map_err(|e| format!("Fallo al lanzar {}: {}", bin, e))?;
-    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-    if !out.status.success() {
-        return Err(format!("Desinstalación falló: {}", stderr.lines().last().unwrap_or("error")));
-    }
+    run_priv(&args, password.as_deref().unwrap_or(""))?;
     Ok(String::from("ok"))
+}
+
+/// Verify a sudo password without doing anything destructive.
+#[tauri::command]
+async fn verify_password(password: String) -> bool {
+    if password.is_empty() { return false; }
+    let mut child = match Command::new("sudo")
+        .arg("-S").arg("-k").arg("-p").arg("").arg("true")
+        .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null())
+        .spawn() { Ok(c) => c, Err(_) => return false };
+    if let Some(mut s) = child.stdin.take() {
+        let _ = s.write_all(format!("{}\n", password).as_bytes());
+    }
+    child.wait().map(|s| s.success()).unwrap_or(false)
+}
+
+/// Read app icon from hicolor theme and return as base64 PNG. Tries multiple
+/// sizes and falls back to scalable SVG. Returns empty string if not found.
+#[tauri::command]
+fn get_icon(name: String) -> String {
+    let sizes = ["256x256", "512x512", "128x128", "96x96", "64x64", "48x48"];
+    for sz in sizes {
+        let p = format!("/usr/share/icons/hicolor/{}/apps/{}.png", sz, name);
+        if let Ok(bytes) = std::fs::read(&p) {
+            return format!("data:image/png;base64,{}", general_purpose::STANDARD.encode(&bytes));
+        }
+    }
+    let svg = format!("/usr/share/icons/hicolor/scalable/apps/{}.svg", name);
+    if let Ok(bytes) = std::fs::read(&svg) {
+        return format!("data:image/svg+xml;base64,{}", general_purpose::STANDARD.encode(&bytes));
+    }
+    String::new()
 }
 
 /// Download a release asset URL to ~/.cache/bookos-store/ and return local path.
@@ -241,6 +288,8 @@ fn main() {
             list_apps,
             is_installed,
             pm_info,
+            get_icon,
+            verify_password,
             launch_app,
             open_release_page,
             install_pkg_file,

@@ -6,6 +6,25 @@ let allApps = [];
 let activeCategory = 'all';
 let theme = 'auto';
 let pmInfo = { pm: 'pacman', exts: ['.pkg.tar.zst'] };
+const iconCache = new Map();
+
+// Disable right-click globally
+window.addEventListener('contextmenu', e => e.preventDefault());
+
+async function getIcon(name) {
+  if (iconCache.has(name)) return iconCache.get(name);
+  try {
+    const d = await invoke('get_icon', { name });
+    iconCache.set(name, d || '');
+    return d || '';
+  } catch { iconCache.set(name, ''); return ''; }
+}
+
+function iconHtml(app, cls) {
+  const data = iconCache.get(app.icon || app.pkg);
+  if (data) return `<img class="${cls}-img" src="${data}" alt="" draggable="false">`;
+  return `<span>${escapeHtml((app.label||'?')[0])}</span>`;
+}
 
 // ───── THEME ─────
 async function applyTheme() {
@@ -41,13 +60,34 @@ async function loadApps() {
     renderGrid();
     return;
   }
-  // Render immediately with installed info, then enrich with GitHub data async
+  // Pre-fetch icons in parallel so cards/hero render with art
+  await Promise.all(allApps.map(a => getIcon(a.icon || a.pkg)));
   renderCategories();
+  renderHero();
   renderGrid();
-  // Fetch latest release tag for each — fully defensive
   for (const a of allApps) {
     fetchReleaseInfo(a).catch(err => console.warn('fetch', a.repo, 'failed:', err));
   }
+}
+
+// ───── HERO ─────
+function renderHero() {
+  const hero = $('#hero');
+  if (!hero) return;
+  if (activeCategory !== 'all' || ($('#search')?.value || '').trim()) {
+    hero.classList.add('hidden');
+    $('#section-title').textContent = activeCategory === 'all' ? 'Resultados' : activeCategory;
+    return;
+  }
+  const featured = allApps.find(a => a.has_update) || allApps.find(a => !a.installed) || allApps[0];
+  if (!featured) { hero.classList.add('hidden'); return; }
+  hero.classList.remove('hidden');
+  hero.style.setProperty('--accent', featured.accent || '#0a84ff');
+  $('#hero-icon').innerHTML = iconHtml(featured, 'hero-icon');
+  $('#hero-title').textContent = featured.label;
+  $('#hero-desc').textContent = featured.description || '';
+  $('#hero-btn').onclick = () => openDrawer(featured);
+  $('#section-title').textContent = 'Todas las apps';
 }
 
 async function fetchReleaseInfo(a) {
@@ -57,7 +97,7 @@ async function fetchReleaseInfo(a) {
       headers: { 'Accept': 'application/vnd.github+json' },
       cache: 'no-cache'
     });
-    if (!r.ok) { a.available = null; a.has_update = false; renderGrid(); return; }
+    if (!r.ok) { a.available = null; a.has_update = false; renderHero(); renderGrid(); return; }
     const d = await r.json();
     const tag = (d.tag_name || '').replace(/^v/i,'').trim();
     a.available = tag;
@@ -69,7 +109,7 @@ async function fetchReleaseInfo(a) {
     } else {
       a.has_update = false;
     }
-    renderGrid();
+    renderHero(); renderGrid();
   } catch (e) {
     console.warn('release fetch failed', a.repo, e);
     a.available = null;
@@ -94,7 +134,7 @@ function renderCategories() {
     const b = document.createElement('button');
     b.className = 'cat-pill' + (cat === activeCategory ? ' on' : '');
     b.textContent = labels[cat] || cat;
-    b.addEventListener('click', () => { activeCategory = cat; renderCategories(); renderGrid(); });
+    b.addEventListener('click', () => { activeCategory = cat; renderCategories(); renderHero(); renderGrid(); });
     c.appendChild(b);
   }
 }
@@ -118,12 +158,14 @@ function renderGrid() {
     const card = document.createElement('div');
     card.className = 'app-card';
     card.style.setProperty('--accent', a.accent || '#0a84ff');
-    const status = a.has_update ? '<span class="app-status update">Update</span>'
-      : a.installed ? '<span class="app-status installed">Instalada</span>'
-      : '<span class="app-status">Disponible</span>';
+    const status = a.has_update
+      ? `<span class="app-status update"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></svg>Actualizar</span>`
+      : a.installed
+        ? `<span class="app-status installed"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>Instalada</span>`
+        : `<span class="app-status"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>Instalar</span>`;
     card.innerHTML = `
       <div class="accent"></div>
-      <div class="app-icon">${escapeHtml(a.label[0] || '?')}</div>
+      <div class="app-icon">${iconHtml(a, 'app-icon')}</div>
       <div class="app-title">${escapeHtml(a.label)}</div>
       <div class="app-desc">${escapeHtml(a.description || '')}</div>
       <div class="app-foot">
@@ -143,7 +185,7 @@ function openDrawer(app) {
   d.classList.remove('hidden');
   const card = $('#drawer-card');
   card.style.setProperty('--accent', app.accent || '#0a84ff');
-  $('#d-icon').textContent = app.label[0] || '?';
+  $('#d-icon').innerHTML = iconHtml(app, 'drawer-icon');
   $('#d-title').textContent = app.label;
   $('#d-pkg').textContent = app.pkg;
   const ver = app.installed
@@ -188,7 +230,6 @@ async function doLaunch(app) {
 }
 
 async function doInstall(app, isUpdate=false) {
-  // Find first matching asset for detected package manager
   const exts = pmInfo.exts || ['.pkg.tar.zst'];
   const asset = (app.release_assets || []).find(a => exts.some(e => a.name.endsWith(e)));
   if (!asset) {
@@ -197,11 +238,15 @@ async function doInstall(app, isUpdate=false) {
     closeDrawer();
     return;
   }
+  const pwd = await promptAuth(
+    isUpdate ? 'Actualizar app' : 'Instalar app',
+    `Para ${isUpdate?'actualizar':'instalar'} "${app.label}", introduce la contraseña del equipo.`);
+  if (pwd === null) return;
   setProgress(true, isUpdate ? 'Actualizando…' : 'Descargando '+asset.name+'…');
   try {
     const localPath = await invoke('download_pkg', { url: asset.browser_download_url, filename: asset.name });
-    setProgress(true, 'Instalando… (puede pedir contraseña)');
-    await invoke('install_pkg_file', { path: localPath });
+    setProgress(true, 'Instalando…');
+    await invoke('install_pkg_file', { path: localPath, password: pwd });
     toast((isUpdate?'Actualizada: ':'Instalada: ') + app.label);
     closeDrawer();
     await loadApps();
@@ -213,10 +258,12 @@ async function doInstall(app, isUpdate=false) {
 }
 
 async function doUninstall(app) {
-  if (!confirm(`¿Desinstalar ${app.label} (${app.pkg})?`)) return;
+  const pwd = await promptAuth('Desinstalar app',
+    `Para desinstalar "${app.label}" (${app.pkg}), introduce la contraseña del equipo.`);
+  if (pwd === null) return;
   setProgress(true, 'Desinstalando…');
   try {
-    await invoke('uninstall_pkg', { pkg: app.pkg });
+    await invoke('uninstall_pkg', { pkg: app.pkg, password: pwd });
     toast('Desinstalada: ' + app.label);
     closeDrawer();
     await loadApps();
@@ -224,6 +271,50 @@ async function doUninstall(app) {
     toast('Error: ' + (typeof e === 'string' ? e.slice(0,140) : e.message || JSON.stringify(e)));
     setProgress(false);
   }
+}
+
+// ───── AUTH DIALOG ─────
+function promptAuth(title, desc) {
+  return new Promise(resolve => {
+    const ov = $('#auth-overlay');
+    const input = $('#auth-input');
+    const err = $('#auth-err');
+    $('#auth-title').textContent = title;
+    $('#auth-desc').textContent = desc;
+    input.value = ''; input.type = 'password';
+    err.classList.add('hidden');
+    ov.classList.remove('hidden');
+    setTimeout(() => input.focus(), 60);
+
+    const cleanup = (val) => {
+      ov.classList.add('hidden');
+      okBtn.removeEventListener('click', onOk);
+      cancelBtn.removeEventListener('click', onCancel);
+      input.removeEventListener('keydown', onKey);
+      eyeBtn.removeEventListener('click', onEye);
+      ov.removeEventListener('click', onBg);
+      resolve(val);
+    };
+    const onOk = async () => {
+      const p = input.value;
+      if (!p) { err.textContent='Contraseña vacía'; err.classList.remove('hidden'); return; }
+      okBtn.disabled = true;
+      const ok = await invoke('verify_password', { password: p });
+      okBtn.disabled = false;
+      if (!ok) { err.textContent='Contraseña incorrecta'; err.classList.remove('hidden'); input.select(); return; }
+      cleanup(p);
+    };
+    const onCancel = () => cleanup(null);
+    const onKey = (e) => { if (e.key==='Enter') onOk(); else if (e.key==='Escape') onCancel(); };
+    const onEye = () => { input.type = input.type==='password'?'text':'password'; };
+    const onBg = (e) => { if (e.target.id==='auth-overlay') onCancel(); };
+    const okBtn = $('#auth-ok'), cancelBtn = $('#auth-cancel'), eyeBtn = $('#auth-eye');
+    okBtn.addEventListener('click', onOk);
+    cancelBtn.addEventListener('click', onCancel);
+    input.addEventListener('keydown', onKey);
+    eyeBtn.addEventListener('click', onEye);
+    ov.addEventListener('click', onBg);
+  });
 }
 
 function setProgress(on, text) {
@@ -241,7 +332,7 @@ function wire() {
   $('#close').addEventListener('click', () => tauriWin().close());
   $('#theme-btn').addEventListener('click', cycleTheme);
   $('#refresh-btn').addEventListener('click', () => loadApps());
-  $('#search').addEventListener('input', renderGrid);
+  $('#search').addEventListener('input', () => { renderHero(); renderGrid(); });
   $('#drawer-close').addEventListener('click', closeDrawer);
   $('#drawer').addEventListener('click', (e) => { if (e.target.id === 'drawer') closeDrawer(); });
   document.addEventListener('keydown', (e) => {
