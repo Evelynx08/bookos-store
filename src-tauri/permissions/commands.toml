@@ -1,0 +1,44 @@
+[[permission]]
+identifier = "allow-list-apps"
+description = "Allow list_apps command"
+commands.allow = ["list_apps"]
+
+[[permission]]
+identifier = "allow-is-installed"
+description = "Allow is_installed command"
+commands.allow = ["is_installed"]
+
+[[permission]]
+identifier = "allow-pm-info"
+description = "Allow pm_info command"
+commands.allow = ["pm_info"]
+
+[[permission]]
+identifier = "allow-launch-app"
+description = "Allow launch_app command"
+commands.allow = ["launch_app"]
+
+[[permission]]
+identifier = "allow-open-release-page"
+description = "Allow open_release_page command"
+commands.allow = ["open_release_page"]
+
+[[permission]]
+identifier = "allow-install-pkg-file"
+description = "Allow install_pkg_file command"
+commands.allow = ["install_pkg_file"]
+
+[[permission]]
+identifier = "allow-uninstall-pkg"
+description = "Allow uninstall_pkg command"
+commands.allow = ["uninstall_pkg"]
+
+[[permission]]
+identifier = "allow-download-pkg"
+description = "Allow download_pkg command"
+commands.allow = ["download_pkg"]
+
+[[permission]]
+identifier = "allow-detect-system-theme"
+description = "Allow detect_system_theme command"
+commands.allow = ["detect_system_theme"]

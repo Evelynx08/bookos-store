@@ -63,28 +63,58 @@ fn catalog() -> Vec<serde_json::Value> {
     ]
 }
 
+/// Package manager backend detected at runtime.
+#[derive(Clone, Copy, PartialEq)]
+enum Pm { Pacman, Dnf }
+
+fn detect_pm() -> Pm {
+    let has = |bin: &str| Command::new("which").arg(bin).output()
+        .map(|o| o.status.success()).unwrap_or(false);
+    if has("dnf") || has("rpm") { Pm::Dnf } else { Pm::Pacman }
+}
+
 #[tauri::command]
 fn list_apps() -> serde_json::Value {
+    let pm = detect_pm();
     let apps = catalog();
     let enriched: Vec<serde_json::Value> = apps.into_iter().map(|mut a| {
         let pkg = a["pkg"].as_str().unwrap_or("");
-        let installed = pacman_version(pkg);
+        let installed = pkg_version(pm, pkg);
         a["installed"] = serde_json::json!(installed);
         a
     }).collect();
     serde_json::json!(enriched)
 }
 
-fn pacman_version(pkg: &str) -> Option<String> {
-    let out = Command::new("pacman").args(["-Q", pkg]).output().ok()?;
-    if !out.status.success() { return None; }
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    s.split_whitespace().nth(1).map(|v| v.to_string())
+fn pkg_version(pm: Pm, pkg: &str) -> Option<String> {
+    match pm {
+        Pm::Pacman => {
+            let out = Command::new("pacman").args(["-Q", pkg]).output().ok()?;
+            if !out.status.success() { return None; }
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            s.split_whitespace().nth(1).map(|v| v.to_string())
+        }
+        Pm::Dnf => {
+            let out = Command::new("rpm").args(["-q", "--qf", "%{VERSION}-%{RELEASE}", pkg]).output().ok()?;
+            if !out.status.success() { return None; }
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if s.is_empty() || s.contains("not installed") { None } else { Some(s) }
+        }
+    }
 }
 
 #[tauri::command]
 fn is_installed(pkg: String) -> bool {
-    pacman_version(&pkg).is_some()
+    pkg_version(detect_pm(), &pkg).is_some()
+}
+
+/// Expose detected package manager + supported asset extensions to frontend.
+#[tauri::command]
+fn pm_info() -> serde_json::Value {
+    match detect_pm() {
+        Pm::Pacman => serde_json::json!({ "pm": "pacman", "exts": [".pkg.tar.zst"] }),
+        Pm::Dnf => serde_json::json!({ "pm": "dnf", "exts": [".rpm"] }),
+    }
 }
 
 #[tauri::command]
@@ -102,19 +132,25 @@ fn open_release_page(repo: String) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// Install a .pkg.tar.zst file via pkexec pacman -U.
-/// Frontend handles GitHub Releases fetch + download; here we just install
-/// from a local file path.
+fn priv_bin() -> &'static str {
+    if Command::new("which").arg("pkexec").output()
+        .map(|o| o.status.success()).unwrap_or(false) { "pkexec" } else { "sudo" }
+}
+
+/// Install a local package file. Backend picks pacman -U or dnf install based
+/// on detected distro. Frontend handles GitHub Releases fetch + download.
 #[tauri::command]
 async fn install_pkg_file(path: String) -> Result<String, String> {
     if !std::path::Path::new(&path).exists() {
         return Err(format!("Archivo no existe: {}", path));
     }
-    // Prefer pkexec for GUI password prompt; fallback to sudo if missing.
-    let bin = if Command::new("which").arg("pkexec").output()
-        .map(|o| o.status.success()).unwrap_or(false) { "pkexec" } else { "sudo" };
+    let bin = priv_bin();
+    let args: Vec<&str> = match detect_pm() {
+        Pm::Pacman => vec!["pacman", "-U", "--noconfirm", &path],
+        Pm::Dnf => vec!["dnf", "install", "-y", &path],
+    };
     let out = Command::new(bin)
-        .args(["pacman", "-U", "--noconfirm", &path])
+        .args(&args)
         .output()
         .map_err(|e| format!("Fallo al lanzar {}: {}", bin, e))?;
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
@@ -125,13 +161,16 @@ async fn install_pkg_file(path: String) -> Result<String, String> {
     Ok(stdout)
 }
 
-/// Uninstall a package via pkexec pacman -Rs.
+/// Uninstall a package via pacman -Rs or dnf remove.
 #[tauri::command]
 async fn uninstall_pkg(pkg: String) -> Result<String, String> {
-    let bin = if Command::new("which").arg("pkexec").output()
-        .map(|o| o.status.success()).unwrap_or(false) { "pkexec" } else { "sudo" };
+    let bin = priv_bin();
+    let args: Vec<&str> = match detect_pm() {
+        Pm::Pacman => vec!["pacman", "-Rs", "--noconfirm", &pkg],
+        Pm::Dnf => vec!["dnf", "remove", "-y", &pkg],
+    };
     let out = Command::new(bin)
-        .args(["pacman", "-Rs", "--noconfirm", &pkg])
+        .args(&args)
         .output()
         .map_err(|e| format!("Fallo al lanzar {}: {}", bin, e))?;
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
@@ -201,6 +240,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             list_apps,
             is_installed,
+            pm_info,
             launch_app,
             open_release_page,
             install_pkg_file,

@@ -5,6 +5,7 @@ const $ = (s, r=document) => r.querySelector(s);
 let allApps = [];
 let activeCategory = 'all';
 let theme = 'auto';
+let pmInfo = { pm: 'pacman', exts: ['.pkg.tar.zst'] };
 
 // ───── THEME ─────
 async function applyTheme() {
@@ -28,28 +29,52 @@ function toast(msg){const t=$('#toast');t.textContent=msg;t.classList.add('show'
 
 // ───── LOAD APPS ─────
 async function loadApps() {
-  try { allApps = await invoke('list_apps'); }
-  catch (e) { console.error(e); toast('Error cargando catálogo'); return; }
-  // Fetch latest release tag for each in parallel
-  await Promise.all(allApps.map(async (a) => {
-    if (!a.installed) { a.available = null; a.has_update = false; return; }
-    try {
-      const r = await fetch(`https://api.github.com/repos/${a.repo}/releases/latest`, {
-        headers: { 'Accept': 'application/vnd.github+json' }, cache: 'no-cache'
-      });
-      if (!r.ok) { a.available = null; return; }
-      const d = await r.json();
-      const tag = (d.tag_name || '').replace(/^v/i,'').trim();
-      a.available = tag;
-      a.release_assets = d.assets || [];
-      a.release_url = d.html_url;
-      // installed is "0.1.0-1" — strip pkgrel
-      const cur = (a.installed||'').split('-')[0];
-      a.has_update = tag && cmpVer(tag, cur) > 0;
-    } catch { a.available = null; }
-  }));
+  try { pmInfo = await invoke('pm_info'); } catch {}
+  try {
+    allApps = await invoke('list_apps');
+    console.log('catalog loaded:', allApps.length, 'apps');
+  } catch (e) {
+    console.error('list_apps failed:', e);
+    toast('Error catálogo: ' + (typeof e==='string'?e:e.message||JSON.stringify(e)).slice(0,140));
+    allApps = [];
+    renderCategories();
+    renderGrid();
+    return;
+  }
+  // Render immediately with installed info, then enrich with GitHub data async
   renderCategories();
   renderGrid();
+  // Fetch latest release tag for each — fully defensive
+  for (const a of allApps) {
+    fetchReleaseInfo(a).catch(err => console.warn('fetch', a.repo, 'failed:', err));
+  }
+}
+
+async function fetchReleaseInfo(a) {
+  if (!a.repo) { a.available = null; return; }
+  try {
+    const r = await fetch(`https://api.github.com/repos/${a.repo}/releases/latest`, {
+      headers: { 'Accept': 'application/vnd.github+json' },
+      cache: 'no-cache'
+    });
+    if (!r.ok) { a.available = null; a.has_update = false; renderGrid(); return; }
+    const d = await r.json();
+    const tag = (d.tag_name || '').replace(/^v/i,'').trim();
+    a.available = tag;
+    a.release_assets = d.assets || [];
+    a.release_url = d.html_url;
+    if (a.installed) {
+      const cur = (a.installed||'').split('-')[0];
+      a.has_update = !!(tag && cmpVer(tag, cur) > 0);
+    } else {
+      a.has_update = false;
+    }
+    renderGrid();
+  } catch (e) {
+    console.warn('release fetch failed', a.repo, e);
+    a.available = null;
+    a.has_update = false;
+  }
 }
 
 function cmpVer(a,b){
@@ -163,10 +188,11 @@ async function doLaunch(app) {
 }
 
 async function doInstall(app, isUpdate=false) {
-  // Find first .pkg.tar.zst asset
-  const asset = (app.release_assets || []).find(a => a.name.endsWith('.pkg.tar.zst'));
+  // Find first matching asset for detected package manager
+  const exts = pmInfo.exts || ['.pkg.tar.zst'];
+  const asset = (app.release_assets || []).find(a => exts.some(e => a.name.endsWith(e)));
   if (!asset) {
-    if (!confirm('No hay paquete .pkg.tar.zst en la release. ¿Abrir página de GitHub?')) return;
+    if (!confirm(`No hay paquete ${exts.join('/')} en la release. ¿Abrir página de GitHub?`)) return;
     invoke('open_release_page', { repo: app.repo });
     closeDrawer();
     return;

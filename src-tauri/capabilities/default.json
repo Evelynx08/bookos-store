@@ -7,6 +7,15 @@
     "urls": ["http://localhost/*", "http://localhost:*/*"]
   },
   "permissions": [
+    "allow-list-apps",
+    "allow-is-installed",
+    "allow-pm-info",
+    "allow-launch-app",
+    "allow-open-release-page",
+    "allow-install-pkg-file",
+    "allow-uninstall-pkg",
+    "allow-download-pkg",
+    "allow-detect-system-theme",
     "core:default",
     "core:webview:default",
     "core:webview:allow-create-webview-window",
