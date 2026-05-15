@@ -1,0 +1,11 @@
+/src-tauri/target/
+/src-tauri/gen/
+*.pkg.tar.zst
+*.pkg.tar.xz
+pkg/
+node_modules/
+*.log
+.env
+.DS_Store
+*.swp
+*~

@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#34c759"/>
+      <stop offset=".5" stop-color="#0a84ff"/>
+      <stop offset="1" stop-color="#af52de"/>
+    </linearGradient>
+    <linearGradient id="bag" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#f5f5f7"/>
+    </linearGradient>
+    <filter id="bagShadow">
+      <feDropShadow dx="0" dy="12" stdDeviation="20" flood-color="#000" flood-opacity=".22"/>
+    </filter>
+  </defs>
+  <rect x="0" y="0" width="1024" height="1024" rx="228" fill="url(#bg)"/>
+  <rect x="0" y="0" width="1024" height="420" rx="228" fill="#fff" opacity=".10"/>
+  <g filter="url(#bagShadow)">
+    <path d="M 260 320
+             Q 260 280 300 280
+             L 724 280
+             Q 764 280 764 320
+             L 798 808
+             Q 800 856 752 856
+             L 272 856
+             Q 224 856 226 808 Z"
+          fill="url(#bag)"/>
+    <!-- handle -->
+    <path d="M 392 280
+             Q 392 200 472 200
+             L 552 200
+             Q 632 200 632 280"
+          fill="none" stroke="#fff" stroke-width="34" stroke-linecap="round"/>
+    <path d="M 392 280
+             Q 392 200 472 200
+             L 552 200
+             Q 632 200 632 280"
+          fill="none" stroke="#0a84ff" stroke-width="22" stroke-linecap="round"/>
+  </g>
+  <!-- 3x download arrow / app symbol on bag -->
+  <g transform="translate(512 560)">
+    <circle r="120" fill="#0a84ff"/>
+    <path d="M 0 -52 L 0 36 M -42 -8 L 0 36 L 42 -8" fill="none" stroke="#fff" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
+    <line x1="-56" y1="64" x2="56" y2="64" stroke="#fff" stroke-width="18" stroke-linecap="round"/>
+  </g>
+</svg>
