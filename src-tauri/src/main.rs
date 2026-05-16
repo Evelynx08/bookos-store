@@ -54,6 +54,16 @@ fn catalog() -> Vec<serde_json::Value> {
             "accent": "#8e8e93"
         }),
         serde_json::json!({
+            "pkg": "bookos-store",
+            "label": "Bookos Store",
+            "description": "Tienda de apps de BookOS. Actualízala desde aquí.",
+            "category": "Sistema",
+            "repo": "Evelynx08/bookos-store",
+            "icon": "bookos-store",
+            "accent": "#0a84ff",
+            "self": true
+        }),
+        serde_json::json!({
             "pkg": "bookos-launchpad",
             "label": "Launchpad",
             "description": "Lanzador de aplicaciones estilo iPad.",

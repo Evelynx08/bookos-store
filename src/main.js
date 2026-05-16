@@ -205,11 +205,15 @@ function renderDrawerActions(app) {
     addBtn(a, 'Instalar', 'primary', () => doInstall(app));
   } else if (app.has_update) {
     addBtn(a, 'Actualizar', 'primary', () => doInstall(app, true));
-    addBtn(a, 'Abrir', '', () => doLaunch(app));
-    addBtn(a, 'Desinstalar', 'danger', () => doUninstall(app));
+    if (!app.self) addBtn(a, 'Abrir', '', () => doLaunch(app));
+    if (!app.self) addBtn(a, 'Desinstalar', 'danger', () => doUninstall(app));
   } else {
-    addBtn(a, 'Abrir', 'primary', () => doLaunch(app));
-    addBtn(a, 'Desinstalar', 'danger', () => doUninstall(app));
+    if (app.self) {
+      addBtn(a, 'Estás en la última versión', '', () => {}).disabled = true;
+    } else {
+      addBtn(a, 'Abrir', 'primary', () => doLaunch(app));
+      addBtn(a, 'Desinstalar', 'danger', () => doUninstall(app));
+    }
   }
 }
 
@@ -219,6 +223,7 @@ function addBtn(parent, label, cls, fn) {
   b.textContent = label;
   b.addEventListener('click', fn);
   parent.appendChild(b);
+  return b;
 }
 
 function closeDrawer(){ $('#drawer').classList.add('hidden'); }
@@ -247,6 +252,11 @@ async function doInstall(app, isUpdate=false) {
     const localPath = await invoke('download_pkg', { url: asset.browser_download_url, filename: asset.name });
     setProgress(true, 'Instalando…');
     await invoke('install_pkg_file', { path: localPath, password: pwd });
+    if (app.self && isUpdate) {
+      toast('Bookos Store actualizada. Reiniciando…');
+      setTimeout(() => tauriWin().close(), 1400);
+      return;
+    }
     toast((isUpdate?'Actualizada: ':'Instalada: ') + app.label);
     closeDrawer();
     await loadApps();
