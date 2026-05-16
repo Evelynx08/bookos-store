@@ -52,3 +52,13 @@ commands.allow = ["get_icon"]
 identifier = "allow-verify-password"
 description = "Allow verify_password command"
 commands.allow = ["verify_password"]
+
+[[permission]]
+identifier = "allow-cancel-op"
+description = "Allow cancel_op command"
+commands.allow = ["cancel_op"]
+
+[[permission]]
+identifier = "allow-progress"
+description = "Allow progress command"
+commands.allow = ["progress"]

@@ -11,13 +11,28 @@ const iconCache = new Map();
 // Disable right-click globally
 window.addEventListener('contextmenu', e => e.preventDefault());
 
-async function getIcon(name) {
+async function getIcon(name, repo) {
   if (iconCache.has(name)) return iconCache.get(name);
+  // 1) Local hicolor (app installed → real system icon)
   try {
     const d = await invoke('get_icon', { name });
-    iconCache.set(name, d || '');
-    return d || '';
-  } catch { iconCache.set(name, ''); return ''; }
+    if (d) { iconCache.set(name, d); return d; }
+  } catch {}
+  // 2) Fetch from app's GitHub repo (pre-install)
+  if (repo) {
+    const url = `https://raw.githubusercontent.com/${repo}/main/src-tauri/icons/icon.png`;
+    try {
+      const r = await fetch(url, { cache: 'force-cache' });
+      if (r.ok) {
+        const blob = await r.blob();
+        const data = await new Promise(res => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.readAsDataURL(blob); });
+        iconCache.set(name, data);
+        return data;
+      }
+    } catch {}
+  }
+  iconCache.set(name, '');
+  return '';
 }
 
 function iconHtml(app, cls) {
@@ -60,34 +75,12 @@ async function loadApps() {
     renderGrid();
     return;
   }
-  // Pre-fetch icons in parallel so cards/hero render with art
-  await Promise.all(allApps.map(a => getIcon(a.icon || a.pkg)));
+  await Promise.all(allApps.map(a => getIcon(a.icon || a.pkg, a.repo)));
   renderCategories();
-  renderHero();
   renderGrid();
   for (const a of allApps) {
     fetchReleaseInfo(a).catch(err => console.warn('fetch', a.repo, 'failed:', err));
   }
-}
-
-// ───── HERO ─────
-function renderHero() {
-  const hero = $('#hero');
-  if (!hero) return;
-  if (activeCategory !== 'all' || ($('#search')?.value || '').trim()) {
-    hero.classList.add('hidden');
-    $('#section-title').textContent = activeCategory === 'all' ? 'Resultados' : activeCategory;
-    return;
-  }
-  const featured = allApps.find(a => a.has_update) || allApps.find(a => !a.installed) || allApps[0];
-  if (!featured) { hero.classList.add('hidden'); return; }
-  hero.classList.remove('hidden');
-  hero.style.setProperty('--accent', featured.accent || '#0a84ff');
-  $('#hero-icon').innerHTML = iconHtml(featured, 'hero-icon');
-  $('#hero-title').textContent = featured.label;
-  $('#hero-desc').textContent = featured.description || '';
-  $('#hero-btn').onclick = () => openDrawer(featured);
-  $('#section-title').textContent = 'Todas las apps';
 }
 
 async function fetchReleaseInfo(a) {
@@ -97,7 +90,7 @@ async function fetchReleaseInfo(a) {
       headers: { 'Accept': 'application/vnd.github+json' },
       cache: 'no-cache'
     });
-    if (!r.ok) { a.available = null; a.has_update = false; renderHero(); renderGrid(); return; }
+    if (!r.ok) { a.available = null; a.has_update = false; renderGrid(); return; }
     const d = await r.json();
     const tag = (d.tag_name || '').replace(/^v/i,'').trim();
     a.available = tag;
@@ -109,7 +102,7 @@ async function fetchReleaseInfo(a) {
     } else {
       a.has_update = false;
     }
-    renderHero(); renderGrid();
+    renderGrid();
   } catch (e) {
     console.warn('release fetch failed', a.repo, e);
     a.available = null;
@@ -134,7 +127,7 @@ function renderCategories() {
     const b = document.createElement('button');
     b.className = 'cat-pill' + (cat === activeCategory ? ' on' : '');
     b.textContent = labels[cat] || cat;
-    b.addEventListener('click', () => { activeCategory = cat; renderCategories(); renderHero(); renderGrid(); });
+    b.addEventListener('click', () => { activeCategory = cat; renderCategories(); renderGrid(); });
     c.appendChild(b);
   }
 }
@@ -149,6 +142,7 @@ function renderGrid() {
     a.pkg.toLowerCase().includes(q) ||
     (a.description||'').toLowerCase().includes(q)
   );
+  refreshUpdateAllBadge();
   const grid = $('#apps-grid');
   const empty = $('#empty');
   grid.innerHTML = '';
@@ -178,6 +172,15 @@ function renderGrid() {
 }
 
 function escapeHtml(s){return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+
+function refreshUpdateAllBadge() {
+  const n = allApps.filter(a => a.has_update).length;
+  const btn = $('#update-all-btn');
+  const c = $('#update-all-count');
+  if (!btn) return;
+  if (n > 0) { btn.classList.remove('hidden'); c.textContent = n; }
+  else btn.classList.add('hidden');
+}
 
 // ───── DRAWER ─────
 function openDrawer(app) {
@@ -234,6 +237,34 @@ async function doLaunch(app) {
   catch (e) { toast('Error: ' + e); }
 }
 
+let currentOpId = null;
+let progressTimer = null;
+function newOpId() { return 'op-' + Math.random().toString(36).slice(2,10) + '-' + Date.now(); }
+
+function startProgressPoll(opId) {
+  stopProgressPoll();
+  progressTimer = setInterval(async () => {
+    try {
+      const p = await invoke('progress', { opId });
+      if (!p || !p.active) { stopProgressPoll(); return; }
+      const pct = Math.max(0, Math.min(100, p.pct || 0));
+      const fill = $('#d-progress-fill');
+      if (fill) { fill.style.width = pct.toFixed(1)+'%'; fill.style.animation = 'none'; }
+      const txt = $('#d-progress-text');
+      if (txt && p.total > 0) {
+        txt.textContent = `Descargando… ${pct.toFixed(0)}% · ${fmtBytes(p.downloaded)} / ${fmtBytes(p.total)}`;
+      }
+    } catch {}
+  }, 250);
+}
+function stopProgressPoll() { if (progressTimer) { clearInterval(progressTimer); progressTimer = null; } }
+function fmtBytes(b) {
+  if (!b) return '0 B';
+  const u = ['B','KB','MB','GB']; let i = 0;
+  while (b >= 1024 && i < u.length-1) { b /= 1024; i++; }
+  return b.toFixed(b<10?1:0) + ' ' + u[i];
+}
+
 async function doInstall(app, isUpdate=false) {
   const exts = pmInfo.exts || ['.pkg.tar.zst'];
   const asset = (app.release_assets || []).find(a => exts.some(e => a.name.endsWith(e)));
@@ -247,11 +278,16 @@ async function doInstall(app, isUpdate=false) {
     isUpdate ? 'Actualizar app' : 'Instalar app',
     `Para ${isUpdate?'actualizar':'instalar'} "${app.label}", introduce la contraseña del equipo.`);
   if (pwd === null) return;
-  setProgress(true, isUpdate ? 'Actualizando…' : 'Descargando '+asset.name+'…');
+  const opId = newOpId();
+  currentOpId = opId;
+  setProgress(true, 'Descargando '+asset.name+'…', true);
+  startProgressPoll(opId);
   try {
-    const localPath = await invoke('download_pkg', { url: asset.browser_download_url, filename: asset.name });
-    setProgress(true, 'Instalando…');
-    await invoke('install_pkg_file', { path: localPath, password: pwd });
+    const localPath = await invoke('download_pkg', { url: asset.browser_download_url, filename: asset.name, opId });
+    stopProgressPoll();
+    setProgress(true, 'Instalando…', false);
+    await invoke('install_pkg_file', { path: localPath, password: pwd, opId });
+    currentOpId = null;
     if (app.self && isUpdate) {
       toast('Bookos Store actualizada. Reiniciando…');
       setTimeout(() => tauriWin().close(), 1400);
@@ -261,8 +297,11 @@ async function doInstall(app, isUpdate=false) {
     closeDrawer();
     await loadApps();
   } catch (e) {
-    console.error(e);
-    toast('Error: ' + (typeof e === 'string' ? e.slice(0,140) : (e.message || JSON.stringify(e))));
+    stopProgressPoll();
+    currentOpId = null;
+    const msg = typeof e === 'string' ? e : (e.message || JSON.stringify(e));
+    if (msg.includes('__cancelled__')) toast('Operación cancelada');
+    else toast('Error: ' + msg.slice(0,140));
     setProgress(false);
   }
 }
@@ -271,16 +310,68 @@ async function doUninstall(app) {
   const pwd = await promptAuth('Desinstalar app',
     `Para desinstalar "${app.label}" (${app.pkg}), introduce la contraseña del equipo.`);
   if (pwd === null) return;
-  setProgress(true, 'Desinstalando…');
+  const opId = newOpId();
+  currentOpId = opId;
+  setProgress(true, 'Desinstalando…', true);
   try {
-    await invoke('uninstall_pkg', { pkg: app.pkg, password: pwd });
+    await invoke('uninstall_pkg', { pkg: app.pkg, password: pwd, opId });
+    currentOpId = null;
     toast('Desinstalada: ' + app.label);
     closeDrawer();
     await loadApps();
   } catch (e) {
-    toast('Error: ' + (typeof e === 'string' ? e.slice(0,140) : e.message || JSON.stringify(e)));
+    currentOpId = null;
+    const msg = typeof e === 'string' ? e : (e.message || JSON.stringify(e));
+    if (msg.includes('__cancelled__')) toast('Operación cancelada');
+    else toast('Error: ' + msg.slice(0,140));
     setProgress(false);
   }
+}
+
+async function cancelCurrentOp() {
+  if (!currentOpId) return;
+  await invoke('cancel_op', { opId: currentOpId });
+}
+
+async function doUpdateAll() {
+  const list = allApps.filter(a => a.has_update);
+  if (list.length === 0) return;
+  const pwd = await promptAuth('Actualizar todas',
+    `Se actualizarán ${list.length} app${list.length>1?'s':''}. Introduce la contraseña del equipo.`);
+  if (pwd === null) return;
+  let needsRestart = false;
+  for (const app of list) {
+    const exts = pmInfo.exts || ['.pkg.tar.zst'];
+    const asset = (app.release_assets || []).find(a => exts.some(e => a.name.endsWith(e)));
+    if (!asset) { toast('Saltada (sin paquete): '+app.label); continue; }
+    const opId = newOpId();
+    currentOpId = opId;
+    openDrawer(app);
+    setProgress(true, 'Descargando '+asset.name+'…', true);
+    startProgressPoll(opId);
+    try {
+      const localPath = await invoke('download_pkg', { url: asset.browser_download_url, filename: asset.name, opId });
+      stopProgressPoll();
+      setProgress(true, 'Instalando '+app.label+'…', false);
+      await invoke('install_pkg_file', { path: localPath, password: pwd, opId });
+      toast('Actualizada: '+app.label);
+      if (app.self) needsRestart = true;
+    } catch (e) {
+      stopProgressPoll();
+      const msg = typeof e === 'string' ? e : (e.message || JSON.stringify(e));
+      if (msg.includes('__cancelled__')) { toast('Cancelado'); break; }
+      toast('Error en '+app.label+': '+msg.slice(0,100));
+    }
+  }
+  currentOpId = null;
+  setProgress(false);
+  closeDrawer();
+  if (needsRestart) {
+    toast('Bookos Store actualizada. Reiniciando…');
+    setTimeout(() => tauriWin().close(), 1400);
+    return;
+  }
+  await loadApps();
 }
 
 // ───── AUTH DIALOG ─────
@@ -327,12 +418,18 @@ function promptAuth(title, desc) {
   });
 }
 
-function setProgress(on, text) {
+function setProgress(on, text, cancellable=false) {
   const p = $('#d-progress');
   p.classList.toggle('hidden', !on);
   if (text) $('#d-progress-text').textContent = text;
-  // Disable action buttons during operation
+  const fill = $('#d-progress-fill');
+  if (fill) {
+    if (cancellable) { fill.style.animation = 'none'; fill.style.width = '0%'; }
+    else { fill.style.animation = ''; fill.style.width = ''; }
+  }
   document.querySelectorAll('#d-actions .drawer-btn').forEach(b => b.disabled = on);
+  const cBtn = $('#d-cancel-btn');
+  if (cBtn) cBtn.classList.toggle('hidden', !(on && cancellable));
 }
 
 // ───── WIRE ─────
@@ -342,7 +439,9 @@ function wire() {
   $('#close').addEventListener('click', () => tauriWin().close());
   $('#theme-btn').addEventListener('click', cycleTheme);
   $('#refresh-btn').addEventListener('click', () => loadApps());
-  $('#search').addEventListener('input', () => { renderHero(); renderGrid(); });
+  $('#update-all-btn').addEventListener('click', () => doUpdateAll());
+  $('#d-cancel-btn').addEventListener('click', () => cancelCurrentOp());
+  $('#search').addEventListener('input', () => { renderGrid(); });
   $('#drawer-close').addEventListener('click', closeDrawer);
   $('#drawer').addEventListener('click', (e) => { if (e.target.id === 'drawer') closeDrawer(); });
   document.addEventListener('keydown', (e) => {

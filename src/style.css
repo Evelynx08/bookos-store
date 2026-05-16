@@ -88,23 +88,6 @@ body{font-family:'Onest','Inter','SF Pro Display',-apple-system,BlinkMacSystemFo
 .toast{position:fixed;bottom:24px;left:50%;transform:translate(-50%,30px);background:var(--card);color:var(--tx);border:1px solid var(--brd);font-size:13px;font-weight:500;padding:10px 20px;border-radius:18px;opacity:0;pointer-events:none;transition:.25s var(--ease);z-index:60;box-shadow:var(--sh-lg);max-width:80vw;text-align:center}
 .toast.show{opacity:1;transform:translate(-50%,0)}
 
-/* Hero */
-.hero{position:relative;border-radius:20px;overflow:hidden;margin-bottom:22px;padding:24px;background:var(--card);box-shadow:var(--sh-md);border:1px solid var(--brd)}
-.hero.hidden{display:none}
-.hero-bg{position:absolute;inset:0;background:linear-gradient(135deg,color-mix(in srgb,var(--accent,var(--blue)) 22%,transparent),color-mix(in srgb,var(--accent,var(--blue)) 6%,transparent) 70%);pointer-events:none}
-.hero-content{position:relative;z-index:1}
-.hero-label{font-size:11px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;color:var(--accent,var(--blue));margin-bottom:14px;opacity:.9}
-.hero-row{display:flex;gap:20px;align-items:center}
-.hero-icon{width:96px;height:96px;border-radius:22px;background:var(--card);box-shadow:var(--sh-md);display:flex;align-items:center;justify-content:center;font-size:42px;font-weight:700;color:var(--accent,var(--blue));flex-shrink:0;overflow:hidden}
-.hero-icon-img{width:78%;height:78%;object-fit:contain}
-.hero-meta{flex:1;min-width:0}
-.hero-title{font-size:24px;font-weight:700;letter-spacing:-.5px;margin-bottom:6px}
-.hero-desc{font-size:13.5px;color:var(--tx2);line-height:1.5;margin-bottom:14px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.hero-btn{background:var(--accent,var(--blue));color:#fff;border:0;font-family:inherit;font-size:13px;font-weight:600;padding:9px 20px;border-radius:11px;cursor:pointer;transition:.15s var(--ease);box-shadow:var(--sh-sm)}
-.hero-btn:hover{transform:translateY(-1px);box-shadow:var(--sh-md);filter:brightness(1.08)}
-
-.section-title{font-size:13px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:var(--tx2);margin:0 4px 12px;opacity:.75}
-
 /* Icon imgs */
 .app-icon{overflow:hidden}
 .app-icon-img{width:78%;height:78%;object-fit:contain}
@@ -135,6 +118,19 @@ body{font-family:'Onest','Inter','SF Pro Display',-apple-system,BlinkMacSystemFo
 .auth-btn.primary{background:var(--blue);color:#fff}
 .auth-btn.primary:hover{background:color-mix(in srgb,var(--blue) 85%,#000)}
 .auth-btn:disabled{opacity:.5;cursor:not-allowed}
+
+/* Update-all badge */
+.tb-update-btn{background:var(--blue);color:#fff;border:0;cursor:pointer;height:28px;padding:0 11px;border-radius:9px;display:inline-flex;align-items:center;gap:6px;font-family:inherit;font-size:12px;font-weight:600;transition:.15s var(--ease);-webkit-app-region:no-drag;margin-right:4px;box-shadow:var(--sh-sm)}
+.tb-update-btn:hover{filter:brightness(1.1);transform:translateY(-1px)}
+.tb-update-btn.hidden{display:none}
+.tb-update-btn span{background:rgba(255,255,255,.25);padding:1px 7px;border-radius:8px;font-size:11px;font-weight:700;min-width:18px;text-align:center}
+
+/* Progress row + cancel */
+.drawer-progress-row{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px}
+.drawer-cancel-btn{background:var(--sbg);border:0;color:var(--red);font-family:inherit;font-size:11.5px;font-weight:600;padding:5px 11px;border-radius:8px;cursor:pointer;transition:.15s var(--ease)}
+.drawer-cancel-btn:hover{background:color-mix(in srgb,var(--red) 14%,transparent)}
+.drawer-cancel-btn.hidden{display:none}
+.drawer-progress-fill{transition:width .25s var(--ease)}
 
 *::-webkit-scrollbar{width:8px;height:8px}
 *::-webkit-scrollbar-track{background:transparent}

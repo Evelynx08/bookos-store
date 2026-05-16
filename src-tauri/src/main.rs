@@ -2,7 +2,49 @@
 
 use std::process::{Command, Stdio};
 use std::io::Write;
+use std::sync::Mutex;
+use std::collections::HashMap;
+use once_cell::sync::Lazy;
 use base64::{Engine as _, engine::general_purpose};
+
+#[derive(Clone, Default)]
+struct OpState {
+    pid: Option<u32>,
+    pct: f64,
+    downloaded: u64,
+    total: u64,
+}
+
+/// Active operations: op_id → {pid, progress}. Read by `progress` cmd, set by
+/// downloader thread, written by track/untrack.
+static OPS: Lazy<Mutex<HashMap<String, OpState>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+
+fn track(op_id: &str, pid: u32) {
+    if let Ok(mut g) = OPS.lock() {
+        g.entry(op_id.to_string()).or_default().pid = Some(pid);
+    }
+}
+fn untrack(op_id: &str) {
+    if let Ok(mut g) = OPS.lock() { g.remove(op_id); }
+}
+fn set_progress(op_id: &str, pct: f64, downloaded: u64, total: u64) {
+    if let Ok(mut g) = OPS.lock() {
+        let e = g.entry(op_id.to_string()).or_default();
+        e.pct = pct; e.downloaded = downloaded; e.total = total;
+    }
+}
+
+#[tauri::command]
+fn progress(op_id: String) -> serde_json::Value {
+    if let Ok(g) = OPS.lock() {
+        if let Some(s) = g.get(&op_id) {
+            return serde_json::json!({
+                "pct": s.pct, "downloaded": s.downloaded, "total": s.total, "active": true
+            });
+        }
+    }
+    serde_json::json!({ "pct": 100.0, "active": false })
+}
 
 /// BookOS app catalog. Each app has: pkgname, label, description, category,
 /// GitHub repo for releases, optional icon URL.
@@ -15,7 +57,7 @@ fn catalog() -> Vec<serde_json::Value> {
             "category": "Productividad",
             "repo": "Evelynx08/bookos-notepad",
             "icon": "bookos-notepad",
-            "accent": "#0a84ff"
+            "accent": "#0A6FDC"
         }),
         serde_json::json!({
             "pkg": "bookos-calc",
@@ -24,7 +66,7 @@ fn catalog() -> Vec<serde_json::Value> {
             "category": "Utilidades",
             "repo": "Evelynx08/bookos-calc",
             "icon": "bookos-calc",
-            "accent": "#ff9500"
+            "accent": "#33D878"
         }),
         serde_json::json!({
             "pkg": "bookos-clock",
@@ -33,16 +75,7 @@ fn catalog() -> Vec<serde_json::Value> {
             "category": "Utilidades",
             "repo": "Evelynx08/bookos-clock",
             "icon": "bookos-clock",
-            "accent": "#ff3b30"
-        }),
-        serde_json::json!({
-            "pkg": "bookos-ai",
-            "label": "AI",
-            "description": "Asistente de IA local para BookOS.",
-            "category": "Productividad",
-            "repo": "Evelynx08/bookos-ai",
-            "icon": "bookos-ai",
-            "accent": "#af52de"
+            "accent": "#273042"
         }),
         serde_json::json!({
             "pkg": "bookos-settings",
@@ -60,17 +93,8 @@ fn catalog() -> Vec<serde_json::Value> {
             "category": "Sistema",
             "repo": "Evelynx08/bookos-store",
             "icon": "bookos-store",
-            "accent": "#0a84ff",
+            "accent": "#9C7BFF",
             "self": true
-        }),
-        serde_json::json!({
-            "pkg": "bookos-launchpad",
-            "label": "Launchpad",
-            "description": "Lanzador de aplicaciones estilo iPad.",
-            "category": "Sistema",
-            "repo": "Evelynx08/BookOS-Launchpad",
-            "icon": "bookos-launchpad",
-            "accent": "#34c759"
         }),
     ]
 }
@@ -145,14 +169,18 @@ fn open_release_page(repo: String) -> Result<(), String> {
 }
 
 /// Run privileged command. If `password` provided, uses `sudo -S` and feeds it
-/// via stdin (lets the UI render a custom password dialog). If empty, falls
-/// back to pkexec (system polkit dialog).
-fn run_priv(args: &[&str], password: &str) -> Result<String, String> {
+/// via stdin. If empty, falls back to pkexec. If `op_id` set, registers PID for
+/// cancellation.
+fn run_priv(args: &[&str], password: &str, op_id: Option<&str>) -> Result<String, String> {
     if password.is_empty() {
         let bin = if Command::new("which").arg("pkexec").output()
             .map(|o| o.status.success()).unwrap_or(false) { "pkexec" } else { "sudo" };
-        let out = Command::new(bin).args(args).output()
-            .map_err(|e| format!("Fallo al lanzar {}: {}", bin, e))?;
+        let child = Command::new(bin).args(args)
+            .stdout(Stdio::piped()).stderr(Stdio::piped())
+            .spawn().map_err(|e| format!("Fallo al lanzar {}: {}", bin, e))?;
+        if let Some(id) = op_id { track(id, child.id()); }
+        let out = child.wait_with_output().map_err(|e| e.to_string())?;
+        if let Some(id) = op_id { untrack(id); }
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
             return Err(format!("Falló: {}", stderr.lines().last().unwrap_or("error")));
@@ -164,26 +192,41 @@ fn run_priv(args: &[&str], password: &str) -> Result<String, String> {
         .args(args)
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
         .spawn().map_err(|e| format!("Fallo al lanzar sudo: {}", e))?;
+    if let Some(id) = op_id { track(id, child.id()); }
     if let Some(mut s) = child.stdin.take() {
         let _ = s.write_all(format!("{}\n", password).as_bytes());
     }
     let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    if let Some(id) = op_id { untrack(id); }
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
     if !out.status.success() {
         if stderr.contains("incorrect password") || stderr.contains("Sorry, try again") {
             return Err("Contraseña incorrecta".into());
         }
+        if stderr.contains("Terminated") || stderr.contains("signal: 15") {
+            return Err("__cancelled__".into());
+        }
         return Err(format!("Falló: {}", stderr.lines().last().unwrap_or(stdout.lines().last().unwrap_or("error"))));
     }
     Ok(stdout)
+}
+
+/// Cancel an in-flight op by sending SIGTERM to its tracked PID.
+#[tauri::command]
+fn cancel_op(op_id: String) -> bool {
+    let pid = match OPS.lock().ok().and_then(|g| g.get(&op_id).and_then(|s| s.pid)) {
+        Some(p) => p, None => return false,
+    };
+    Command::new("kill").arg("-TERM").arg(pid.to_string()).status()
+        .map(|s| s.success()).unwrap_or(false)
 }
 
 /// Install a local package file. Backend picks pacman -U or dnf install based
 /// on detected distro. If `password` is provided, uses sudo -S (custom dialog);
 /// otherwise pkexec (system dialog).
 #[tauri::command]
-async fn install_pkg_file(path: String, password: Option<String>) -> Result<String, String> {
+async fn install_pkg_file(path: String, password: Option<String>, op_id: Option<String>) -> Result<String, String> {
     if !std::path::Path::new(&path).exists() {
         return Err(format!("Archivo no existe: {}", path));
     }
@@ -191,17 +234,17 @@ async fn install_pkg_file(path: String, password: Option<String>) -> Result<Stri
         Pm::Pacman => vec!["pacman", "-U", "--noconfirm", &path],
         Pm::Dnf => vec!["dnf", "install", "-y", &path],
     };
-    run_priv(&args, password.as_deref().unwrap_or(""))
+    run_priv(&args, password.as_deref().unwrap_or(""), op_id.as_deref())
 }
 
 /// Uninstall a package via pacman -Rs or dnf remove.
 #[tauri::command]
-async fn uninstall_pkg(pkg: String, password: Option<String>) -> Result<String, String> {
+async fn uninstall_pkg(pkg: String, password: Option<String>, op_id: Option<String>) -> Result<String, String> {
     let args: Vec<&str> = match detect_pm() {
         Pm::Pacman => vec!["pacman", "-Rs", "--noconfirm", &pkg],
         Pm::Dnf => vec!["dnf", "remove", "-y", &pkg],
     };
-    run_priv(&args, password.as_deref().unwrap_or(""))?;
+    run_priv(&args, password.as_deref().unwrap_or(""), op_id.as_deref())?;
     Ok(String::from("ok"))
 }
 
@@ -237,25 +280,67 @@ fn get_icon(name: String) -> String {
     String::new()
 }
 
-/// Download a release asset URL to ~/.cache/bookos-store/ and return local path.
+/// Download asset to ~/.cache/bookos-store/. Writes progress to OPS map for
+/// frontend to poll via `progress(op_id)`. Cancellable via cancel_op(op_id).
 #[tauri::command]
-async fn download_pkg(url: String, filename: String) -> Result<String, String> {
+async fn download_pkg(url: String, filename: String, op_id: Option<String>) -> Result<String, String> {
     let mut dest = dirs::cache_dir().ok_or_else(|| "no cache dir".to_string())?;
     dest.push("bookos-store");
     std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
     dest.push(&filename);
-    // Use curl (always available on Arch) for download
-    let out = Command::new("curl")
-        .args(["-fSL", "-o"])
+
+    let total = head_size(&url).unwrap_or(0);
+    let dest_clone = dest.clone();
+    let op = op_id.clone().unwrap_or_default();
+
+    let mut child = Command::new("curl")
+        .args(["-fSL", "--silent", "-o"])
         .arg(&dest)
         .arg(&url)
-        .output()
-        .map_err(|e| format!("curl falló: {}", e))?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        return Err(format!("Descarga falló: {}", stderr.lines().last().unwrap_or("")));
+        .spawn().map_err(|e| format!("curl falló: {}", e))?;
+
+    let pid = child.id();
+    if let Some(id) = op_id.as_deref() { track(id, pid); }
+
+    let stop_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_clone = stop_flag.clone();
+    let op_for_thread = op.clone();
+    let poller = std::thread::spawn(move || {
+        while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let cur = std::fs::metadata(&dest_clone).map(|m| m.len()).unwrap_or(0);
+            let pct = if total > 0 { ((cur as f64 / total as f64) * 100.0).min(99.0) } else { 0.0 };
+            if !op_for_thread.is_empty() {
+                set_progress(&op_for_thread, pct, cur, total);
+            }
+        }
+    });
+
+    let status = child.wait().map_err(|e| e.to_string())?;
+    stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = poller.join();
+
+    if !status.success() {
+        if let Some(id) = op_id.as_deref() { untrack(id); }
+        let _ = std::fs::remove_file(&dest);
+        if status.code().is_none() { return Err("__cancelled__".into()); }
+        return Err(format!("Descarga falló (exit {})", status.code().unwrap_or(-1)));
     }
+    let final_size = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+    if !op.is_empty() { set_progress(&op, 100.0, final_size, if total>0 { total } else { final_size }); }
+    if let Some(id) = op_id.as_deref() { untrack(id); }
     Ok(dest.to_string_lossy().to_string())
+}
+
+/// HEAD request via curl to discover Content-Length. Returns None on failure.
+fn head_size(url: &str) -> Option<u64> {
+    let out = Command::new("curl")
+        .args(["-sIL", "-o", "/dev/null", "-w", "%{size_download}\n%{header_json}"])
+        .arg(url).output().ok()?;
+    let s = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(s.lines().nth(1)?).ok()?;
+    let cl = v.get("content-length")?.as_array()?.last()?.as_str()?.parse::<u64>().ok()?;
+    Some(cl)
 }
 
 #[tauri::command]
@@ -305,6 +390,8 @@ fn main() {
             install_pkg_file,
             uninstall_pkg,
             download_pkg,
+            cancel_op,
+            progress,
             detect_system_theme,
         ])
         .setup(move |app| {
