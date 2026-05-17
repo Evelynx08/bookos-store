@@ -20,16 +20,18 @@ async function getIcon(name, repo) {
   } catch {}
   // 2) Fetch from app's GitHub repo (pre-install)
   if (repo) {
-    const url = `https://raw.githubusercontent.com/${repo}/main/src-tauri/icons/icon.png`;
-    try {
-      const r = await fetch(url, { cache: 'force-cache' });
-      if (r.ok) {
-        const blob = await r.blob();
-        const data = await new Promise(res => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.readAsDataURL(blob); });
-        iconCache.set(name, data);
-        return data;
-      }
-    } catch {}
+    for (const branch of ['master', 'main']) {
+      const url = `https://raw.githubusercontent.com/${repo}/${branch}/src-tauri/icons/icon.png`;
+      try {
+        const r = await fetch(url, { cache: 'force-cache' });
+        if (r.ok) {
+          const blob = await r.blob();
+          const data = await new Promise(res => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.readAsDataURL(blob); });
+          iconCache.set(name, data);
+          return data;
+        }
+      } catch {}
+    }
   }
   iconCache.set(name, '');
   return '';
@@ -86,16 +88,13 @@ async function loadApps() {
 async function fetchReleaseInfo(a) {
   if (!a.repo) { a.available = null; return; }
   try {
-    const r = await fetch(`https://api.github.com/repos/${a.repo}/releases/latest`, {
-      headers: { 'Accept': 'application/vnd.github+json' },
-      cache: 'no-cache'
-    });
-    if (!r.ok) { a.available = null; a.has_update = false; renderGrid(); return; }
-    const d = await r.json();
+    const d = await invoke('fetch_release', { repo: a.repo });
+    if (!d || !d.tag_name) { a.available = null; a.has_update = false; renderGrid(); return; }
     const tag = (d.tag_name || '').replace(/^v/i,'').trim();
     a.available = tag;
     a.release_assets = d.assets || [];
     a.release_url = d.html_url;
+    a.release_stale = !!d._stale;
     if (a.installed) {
       const cur = (a.installed||'').split('-')[0];
       a.has_update = !!(tag && cmpVer(tag, cur) > 0);
@@ -104,7 +103,7 @@ async function fetchReleaseInfo(a) {
     }
     renderGrid();
   } catch (e) {
-    console.warn('release fetch failed', a.repo, e);
+    console.warn('fetch_release failed', a.repo, e);
     a.available = null;
     a.has_update = false;
   }

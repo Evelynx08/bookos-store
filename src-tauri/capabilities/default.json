@@ -20,6 +20,7 @@
     "allow-verify-password",
     "allow-cancel-op",
     "allow-progress",
+    "allow-fetch-release",
     "core:default",
     "core:webview:default",
     "core:webview:allow-create-webview-window",

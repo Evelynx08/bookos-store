@@ -332,6 +332,56 @@ async fn download_pkg(url: String, filename: String, op_id: Option<String>) -> R
     Ok(dest.to_string_lossy().to_string())
 }
 
+/// Fetch latest release info from GitHub with disk cache (TTL 1h).
+/// On rate-limit / network error returns stale cache if available.
+#[tauri::command]
+async fn fetch_release(repo: String) -> Result<serde_json::Value, String> {
+    let mut cache_path = dirs::cache_dir().ok_or_else(|| "no cache dir".to_string())?;
+    cache_path.push("bookos-store");
+    cache_path.push("releases");
+    std::fs::create_dir_all(&cache_path).map_err(|e| e.to_string())?;
+    let safe = repo.replace('/', "_");
+    cache_path.push(format!("{}.json", safe));
+
+    let fresh = std::fs::metadata(&cache_path).ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.elapsed().ok())
+        .map(|d| d.as_secs() < 3600)
+        .unwrap_or(false);
+
+    if fresh {
+        if let Ok(s) = std::fs::read_to_string(&cache_path) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) { return Ok(v); }
+        }
+    }
+
+    let url = format!("https://api.github.com/repos/{}/releases/latest", repo);
+    let out = Command::new("curl")
+        .args(["-fsSL", "-H", "Accept: application/vnd.github+json", "-H", "User-Agent: bookos-store"])
+        .arg(&url).output();
+    match out {
+        Ok(o) if o.status.success() => {
+            let body = String::from_utf8_lossy(&o.stdout).to_string();
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+                let _ = std::fs::write(&cache_path, &body);
+                return Ok(v);
+            }
+            Err("respuesta JSON inválida".into())
+        }
+        _ => {
+            // Network failed or rate-limited: use stale cache if exists
+            if let Ok(s) = std::fs::read_to_string(&cache_path) {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+                    let mut v = v;
+                    v["_stale"] = serde_json::json!(true);
+                    return Ok(v);
+                }
+            }
+            Err("Sin conexión o GitHub rate-limited. Reintenta luego.".into())
+        }
+    }
+}
+
 /// HEAD request via curl to discover Content-Length. Returns None on failure.
 fn head_size(url: &str) -> Option<u64> {
     let out = Command::new("curl")
@@ -392,6 +442,7 @@ fn main() {
             download_pkg,
             cancel_op,
             progress,
+            fetch_release,
             detect_system_theme,
         ])
         .setup(move |app| {

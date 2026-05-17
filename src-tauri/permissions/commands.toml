@@ -62,3 +62,8 @@ commands.allow = ["cancel_op"]
 identifier = "allow-progress"
 description = "Allow progress command"
 commands.allow = ["progress"]
+
+[[permission]]
+identifier = "allow-fetch-release"
+description = "Allow fetch_release command"
+commands.allow = ["fetch_release"]
