@@ -42,4 +42,7 @@ EOF
         2>/dev/null || true
     done
   fi
+
+  [ -f "$startdir/src-tauri/icons/icon.svg" ] && install -Dm644 "$startdir/src-tauri/icons/icon.svg" \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/bookos-store.svg"
 }

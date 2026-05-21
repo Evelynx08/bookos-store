@@ -11,27 +11,24 @@ const iconCache = new Map();
 // Disable right-click globally
 window.addEventListener('contextmenu', e => e.preventDefault());
 
-async function getIcon(name, repo) {
+async function getIcon(name, repo, iconUrl) {
   if (iconCache.has(name)) return iconCache.get(name);
   // 1) Local hicolor (app installed → real system icon)
   try {
     const d = await invoke('get_icon', { name });
     if (d) { iconCache.set(name, d); return d; }
   } catch {}
-  // 2) Fetch from app's GitHub repo (pre-install)
-  if (repo) {
-    for (const branch of ['master', 'main']) {
-      const url = `https://raw.githubusercontent.com/${repo}/${branch}/src-tauri/icons/icon.png`;
-      try {
-        const r = await fetch(url, { cache: 'force-cache' });
-        if (r.ok) {
-          const blob = await r.blob();
-          const data = await new Promise(res => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.readAsDataURL(blob); });
-          iconCache.set(name, data);
-          return data;
-        }
-      } catch {}
-    }
+  // 2) Catalog-provided icon URL (served from bookos.es/store-files/<pkg>/icon.*)
+  if (iconUrl) {
+    try {
+      const r = await fetch(iconUrl, { cache: 'force-cache' });
+      if (r.ok) {
+        const blob = await r.blob();
+        const data = await new Promise(res => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.readAsDataURL(blob); });
+        iconCache.set(name, data);
+        return data;
+      }
+    } catch {}
   }
   iconCache.set(name, '');
   return '';
@@ -77,7 +74,7 @@ async function loadApps() {
     renderGrid();
     return;
   }
-  await Promise.all(allApps.map(a => getIcon(a.icon || a.pkg, a.repo)));
+  await Promise.all(allApps.map(a => getIcon(a.icon || a.pkg, a.repo, a.icon_url)));
   renderCategories();
   renderGrid();
   for (const a of allApps) {
@@ -195,7 +192,7 @@ function openDrawer(app) {
     : (app.available ? `Última versión: ${app.available}` : 'No instalada');
   $('#d-version').textContent = ver;
   $('#d-desc').textContent = app.description || '';
-  $('#d-repo').href = `https://github.com/${app.repo}`;
+  $('#d-repo').href = app.html_url || `https://bookos.es/`;
   renderDrawerActions(app);
   $('#d-progress').classList.add('hidden');
 }

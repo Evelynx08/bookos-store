@@ -46,76 +46,90 @@ fn progress(op_id: String) -> serde_json::Value {
     serde_json::json!({ "pct": 100.0, "active": false })
 }
 
-/// BookOS app catalog. Each app has: pkgname, label, description, category,
-/// GitHub repo for releases, optional icon URL.
-fn catalog() -> Vec<serde_json::Value> {
-    vec![
-        serde_json::json!({
-            "pkg": "bookos-notepad",
-            "label": "Bloc de notas",
-            "description": "Editor de texto con pestañas, preview HTML/MD, adblock y atajos personalizables.",
-            "category": "Productividad",
-            "repo": "Evelynx08/bookos-notepad",
-            "icon": "bookos-notepad",
-            "accent": "#0A6FDC"
-        }),
-        serde_json::json!({
-            "pkg": "bookos-calc",
-            "label": "Calculadora",
-            "description": "Calculadora estándar, científica, conversor de unidades y monedas.",
-            "category": "Utilidades",
-            "repo": "Evelynx08/bookos-calc",
-            "icon": "bookos-calc",
-            "accent": "#33D878"
-        }),
-        serde_json::json!({
-            "pkg": "bookos-clock",
-            "label": "Reloj",
-            "description": "Reloj mundial, alarmas, temporizador y cronómetro.",
-            "category": "Utilidades",
-            "repo": "Evelynx08/bookos-clock",
-            "icon": "bookos-clock",
-            "accent": "#273042"
-        }),
-        serde_json::json!({
-            "pkg": "bookos-settings",
-            "label": "Ajustes",
-            "description": "Centro de control y configuración del sistema.",
-            "category": "Sistema",
-            "repo": "Evelynx08/bookos-settings",
-            "icon": "bookos-settings",
-            "accent": "#8e8e93"
-        }),
-        serde_json::json!({
-            "pkg": "bookos-store",
-            "label": "Bookos Store",
-            "description": "Tienda de apps de BookOS. Actualízala desde aquí.",
-            "category": "Sistema",
-            "repo": "Evelynx08/bookos-store",
-            "icon": "bookos-store",
-            "accent": "#9C7BFF",
-            "self": true
-        }),
-    ]
+/// Remote catalog endpoint. Single source of truth for available apps + their
+/// latest versions + asset URLs. Served by the BookOS website (PHP backend),
+/// not GitHub, so publishing a new app does not need a client recompile.
+/// Override at runtime with env BOOKOS_CATALOG_URL.
+fn catalog_url() -> String {
+    std::env::var("BOOKOS_CATALOG_URL")
+        .unwrap_or_else(|_| "https://bookos.es/api/store.json".to_string())
+}
+
+/// Fetch catalog from server with on-disk cache (TTL 10 min). On network
+/// failure returns stale cache marked with `_stale: true`. Empty list if no
+/// cache and no network.
+fn fetch_catalog_cached() -> Vec<serde_json::Value> {
+    let mut cache_path = match dirs::cache_dir() {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+    cache_path.push("bookos-store");
+    let _ = std::fs::create_dir_all(&cache_path);
+    cache_path.push("catalog.json");
+
+    let fresh = std::fs::metadata(&cache_path).ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.elapsed().ok())
+        .map(|d| d.as_secs() < 600)
+        .unwrap_or(false);
+
+    if fresh {
+        if let Ok(s) = std::fs::read_to_string(&cache_path) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+                return v.get("apps").and_then(|a| a.as_array()).cloned().unwrap_or_default();
+            }
+        }
+    }
+
+    let url = catalog_url();
+    let out = Command::new("curl")
+        .args(["-fsSL", "--max-time", "15",
+               "-H", "Accept: application/json",
+               "-H", "User-Agent: bookos-store"])
+        .arg(&url).output();
+
+    if let Ok(o) = out {
+        if o.status.success() {
+            let body = String::from_utf8_lossy(&o.stdout).to_string();
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+                let _ = std::fs::write(&cache_path, &body);
+                return v.get("apps").and_then(|a| a.as_array()).cloned().unwrap_or_default();
+            }
+        }
+    }
+
+    // Stale fallback.
+    if let Ok(s) = std::fs::read_to_string(&cache_path) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+            return v.get("apps").and_then(|a| a.as_array()).cloned().unwrap_or_default();
+        }
+    }
+    Vec::new()
 }
 
 /// Package manager backend detected at runtime.
 #[derive(Clone, Copy, PartialEq)]
-enum Pm { Pacman, Dnf }
+enum Pm { Pacman, Dnf, Apt }
 
 fn detect_pm() -> Pm {
-    let has = |bin: &str| Command::new("which").arg(bin).output()
-        .map(|o| o.status.success()).unwrap_or(false);
-    if has("dnf") || has("rpm") { Pm::Dnf } else { Pm::Pacman }
+    let exists = |p: &str| std::path::Path::new(p).exists();
+    let has = |bin: &str| {
+        exists(&format!("/usr/bin/{}", bin)) || exists(&format!("/bin/{}", bin))
+            || Command::new("which").arg(bin).output()
+                .map(|o| o.status.success()).unwrap_or(false)
+    };
+    if has("dpkg") || has("apt") { Pm::Apt }
+    else if has("dnf") || has("rpm") { Pm::Dnf }
+    else { Pm::Pacman }
 }
 
 #[tauri::command]
 fn list_apps() -> serde_json::Value {
     let pm = detect_pm();
-    let apps = catalog();
+    let apps = fetch_catalog_cached();
     let enriched: Vec<serde_json::Value> = apps.into_iter().map(|mut a| {
-        let pkg = a["pkg"].as_str().unwrap_or("");
-        let installed = pkg_version(pm, pkg);
+        let pkg = a["pkg"].as_str().unwrap_or("").to_string();
+        let installed = pkg_version(pm, &pkg);
         a["installed"] = serde_json::json!(installed);
         a
     }).collect();
@@ -136,6 +150,12 @@ fn pkg_version(pm: Pm, pkg: &str) -> Option<String> {
             let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if s.is_empty() || s.contains("not installed") { None } else { Some(s) }
         }
+        Pm::Apt => {
+            let out = Command::new("dpkg-query").args(["-W", "-f=${Version}", pkg]).output().ok()?;
+            if !out.status.success() { return None; }
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if s.is_empty() { None } else { Some(s) }
+        }
     }
 }
 
@@ -150,6 +170,7 @@ fn pm_info() -> serde_json::Value {
     match detect_pm() {
         Pm::Pacman => serde_json::json!({ "pm": "pacman", "exts": [".pkg.tar.zst"] }),
         Pm::Dnf => serde_json::json!({ "pm": "dnf", "exts": [".rpm"] }),
+        Pm::Apt => serde_json::json!({ "pm": "apt", "exts": [".deb"] }),
     }
 }
 
@@ -160,10 +181,15 @@ fn launch_app(pkg: String) -> Result<(), String> {
         .map_err(|e| format!("No se pudo lanzar {}: {}", pkg, e))
 }
 
-/// Open release page in browser as fallback for manual install
+/// Open the app's homepage (or BookOS site) in the browser as a fallback when
+/// no compatible binary is available for this user's distro.
 #[tauri::command]
 fn open_release_page(repo: String) -> Result<(), String> {
-    let url = format!("https://github.com/{}/releases", repo);
+    let pkg = repo.rsplit('/').next().unwrap_or(&repo).to_string();
+    let url = fetch_catalog_cached().into_iter()
+        .find(|a| a["pkg"].as_str() == Some(&pkg))
+        .and_then(|a| a.get("html_url").and_then(|u| u.as_str()).map(String::from))
+        .unwrap_or_else(|| "https://bookos.es/".to_string());
     Command::new("xdg-open").arg(&url).spawn().map(|_| ())
         .map_err(|e| e.to_string())
 }
@@ -233,6 +259,7 @@ async fn install_pkg_file(path: String, password: Option<String>, op_id: Option<
     let args: Vec<&str> = match detect_pm() {
         Pm::Pacman => vec!["pacman", "-U", "--noconfirm", &path],
         Pm::Dnf => vec!["dnf", "install", "-y", &path],
+        Pm::Apt => vec!["apt", "install", "-y", &path],
     };
     run_priv(&args, password.as_deref().unwrap_or(""), op_id.as_deref())
 }
@@ -243,6 +270,7 @@ async fn uninstall_pkg(pkg: String, password: Option<String>, op_id: Option<Stri
     let args: Vec<&str> = match detect_pm() {
         Pm::Pacman => vec!["pacman", "-Rs", "--noconfirm", &pkg],
         Pm::Dnf => vec!["dnf", "remove", "-y", &pkg],
+        Pm::Apt => vec!["apt", "remove", "-y", &pkg],
     };
     run_priv(&args, password.as_deref().unwrap_or(""), op_id.as_deref())?;
     Ok(String::from("ok"))
@@ -332,54 +360,33 @@ async fn download_pkg(url: String, filename: String, op_id: Option<String>) -> R
     Ok(dest.to_string_lossy().to_string())
 }
 
-/// Fetch latest release info from GitHub with disk cache (TTL 1h).
-/// On rate-limit / network error returns stale cache if available.
+/// Fetch latest release info for a single app from the BookOS catalog.
+/// Frontend keeps calling `fetch_release({ repo })` — for back-compat the
+/// `repo` argument is now treated as the package id (or, if it contains "/",
+/// the last segment is used). Returns a GitHub-release-compatible shape so
+/// the existing UI code keeps working unchanged.
 #[tauri::command]
 async fn fetch_release(repo: String) -> Result<serde_json::Value, String> {
-    let mut cache_path = dirs::cache_dir().ok_or_else(|| "no cache dir".to_string())?;
-    cache_path.push("bookos-store");
-    cache_path.push("releases");
-    std::fs::create_dir_all(&cache_path).map_err(|e| e.to_string())?;
-    let safe = repo.replace('/', "_");
-    cache_path.push(format!("{}.json", safe));
+    let pkg = repo.rsplit('/').next().unwrap_or(&repo).to_string();
 
-    let fresh = std::fs::metadata(&cache_path).ok()
-        .and_then(|m| m.modified().ok())
-        .and_then(|t| t.elapsed().ok())
-        .map(|d| d.as_secs() < 3600)
-        .unwrap_or(false);
+    // Pull from already-cached catalog first (cheap, no extra HTTP).
+    let apps = fetch_catalog_cached();
+    let app = apps.into_iter().find(|a| a["pkg"].as_str() == Some(&pkg));
+    let app = match app {
+        Some(a) => a,
+        None => return Err(format!("App '{}' no está en el catálogo.", pkg)),
+    };
 
-    if fresh {
-        if let Ok(s) = std::fs::read_to_string(&cache_path) {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) { return Ok(v); }
-        }
-    }
-
-    let url = format!("https://api.github.com/repos/{}/releases/latest", repo);
-    let out = Command::new("curl")
-        .args(["-fsSL", "-H", "Accept: application/vnd.github+json", "-H", "User-Agent: bookos-store"])
-        .arg(&url).output();
-    match out {
-        Ok(o) if o.status.success() => {
-            let body = String::from_utf8_lossy(&o.stdout).to_string();
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
-                let _ = std::fs::write(&cache_path, &body);
-                return Ok(v);
-            }
-            Err("respuesta JSON inválida".into())
-        }
-        _ => {
-            // Network failed or rate-limited: use stale cache if exists
-            if let Ok(s) = std::fs::read_to_string(&cache_path) {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
-                    let mut v = v;
-                    v["_stale"] = serde_json::json!(true);
-                    return Ok(v);
-                }
-            }
-            Err("Sin conexión o GitHub rate-limited. Reintenta luego.".into())
-        }
-    }
+    // Map catalog shape → GitHub-release shape that main.js already consumes.
+    let tag = app.get("available").cloned().unwrap_or(serde_json::Value::Null);
+    let assets = app.get("assets").cloned().unwrap_or(serde_json::Value::Array(vec![]));
+    let html_url = app.get("html_url").cloned().unwrap_or(serde_json::Value::String(String::new()));
+    Ok(serde_json::json!({
+        "tag_name": tag,
+        "assets":   assets,
+        "html_url": html_url,
+        "body":     app.get("notes").cloned().unwrap_or(serde_json::Value::String(String::new())),
+    }))
 }
 
 /// HEAD request via curl to discover Content-Length. Returns None on failure.
