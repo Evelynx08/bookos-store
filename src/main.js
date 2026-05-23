@@ -6,6 +6,25 @@ let allApps = [];
 let activeCategory = 'all';
 let theme = 'auto';
 let pmInfo = { pm: 'pacman', exts: ['.pkg.tar.zst'] };
+
+// Asset compatible with current pm? Prefer server-side `kind` (set by backend
+// when admin uploads files), fall back to filename extension for legacy entries.
+function assetCompat(asset, pm) {
+  if (!asset || !asset.name) return false;
+  const k = (asset.kind || '').toLowerCase();
+  if (k) {
+    if (pm === 'pacman' && k === 'pacman') return true;
+    if (pm === 'dnf'    && (k === 'dnf' || k === 'rpm')) return true;
+    if (pm === 'apt'    && (k === 'apt' || k === 'deb')) return true;
+    if (k === 'appimage') return true;
+    return false;
+  }
+  const n = asset.name.toLowerCase();
+  if (pm === 'pacman') return n.endsWith('.pkg.tar.zst');
+  if (pm === 'dnf')    return n.endsWith('.rpm');
+  if (pm === 'apt')    return n.endsWith('.deb');
+  return false;
+}
 const iconCache = new Map();
 
 // Disable right-click globally
@@ -188,9 +207,9 @@ function openDrawer(app) {
 function renderDrawerActions(app) {
   const a = $('#d-actions');
   a.innerHTML = '';
-  const exts = pmInfo.exts || ['.pkg.tar.zst'];
-  const hasCompatible = (app.release_assets || []).some(x => exts.some(e => x.name.endsWith(e)));
   const pmName = pmInfo.pm || 'pacman';
+  const hasCompatible = (app.release_assets || []).some(x => assetCompat(x, pmName));
+  const exts = pmInfo.exts || ['.pkg.tar.zst'];
 
   if (!app.installed) {
     if (hasCompatible) {
@@ -259,9 +278,10 @@ function fmtBytes(b) {
 }
 
 async function doInstall(app, isUpdate=false) {
-  const exts = pmInfo.exts || ['.pkg.tar.zst'];
-  const asset = (app.release_assets || []).find(a => exts.some(e => a.name.endsWith(e)));
+  const pmName = pmInfo.pm || 'pacman';
+  const asset = (app.release_assets || []).find(a => assetCompat(a, pmName));
   if (!asset) {
+    const exts = pmInfo.exts || ['.pkg.tar.zst'];
     toast(`No hay paquete ${exts.join('/')} disponible para esta app.`);
     return;
   }
@@ -351,8 +371,8 @@ async function doUpdateAll() {
   if (pwd === null) return;
   let needsRestart = false;
   for (const app of list) {
-    const exts = pmInfo.exts || ['.pkg.tar.zst'];
-    const asset = (app.release_assets || []).find(a => exts.some(e => a.name.endsWith(e)));
+    const pmName = pmInfo.pm || 'pacman';
+    const asset = (app.release_assets || []).find(a => assetCompat(a, pmName));
     if (!asset) { toast('Saltada (sin paquete): '+app.label); continue; }
     const opId = newOpId();
     currentOpId = opId;
