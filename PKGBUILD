@@ -1,9 +1,9 @@
 pkgname=bookos-store
-pkgver=0.2.0
+pkgver=0.3.0
 pkgrel=1
 pkgdesc="Tienda de apps para el ecosistema BookOS — instalar, actualizar y desinstalar"
 arch=('x86_64')
-url="https://github.com/Evelynx08/bookos-store"
+url="https://bookos.es/"
 license=('MIT')
 depends=('webkit2gtk-4.1' 'gtk3' 'libsoup3' 'librsvg' 'curl' 'polkit' 'xdg-utils')
 makedepends=('rust' 'cargo' 'pkgconf' 'base-devel' 'imagemagick')

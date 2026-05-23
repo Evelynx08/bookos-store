@@ -1,6 +1,6 @@
 [package]
 name = "bookos-store"
-version = "0.2.0"
+version = "0.3.0"
 description = "BookOS Store — instala y gestiona las apps del ecosistema BookOS"
 authors = ["BookOS"]
 edition = "2021"

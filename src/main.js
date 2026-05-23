@@ -18,10 +18,11 @@ async function getIcon(name, repo, iconUrl) {
     const d = await invoke('get_icon', { name });
     if (d) { iconCache.set(name, d); return d; }
   } catch {}
-  // 2) Catalog-provided icon URL (served from bookos.es/store-files/<pkg>/icon.*)
+  // 2) Catalog-provided icon URL. Use no-store so refresh shows the latest icon
+  // after admin replaces it on the server.
   if (iconUrl) {
     try {
-      const r = await fetch(iconUrl, { cache: 'force-cache' });
+      const r = await fetch(iconUrl, { cache: 'no-store' });
       if (r.ok) {
         const blob = await r.blob();
         const data = await new Promise(res => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.readAsDataURL(blob); });
@@ -61,6 +62,9 @@ let toastTimer;
 function toast(msg){const t=$('#toast');t.textContent=msg;t.classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.classList.remove('show'),2200);}
 
 // ───── LOAD APPS ─────
+// Server catalog (/api/store.json) already returns: pkg, label, description,
+// category, icon_url, accent, available, released, notes, assets[], html_url.
+// One HTTP call; no per-app GitHub fetch.
 async function loadApps() {
   try { pmInfo = await invoke('pm_info'); } catch {}
   try {
@@ -74,36 +78,20 @@ async function loadApps() {
     renderGrid();
     return;
   }
-  await Promise.all(allApps.map(a => getIcon(a.icon || a.pkg, a.repo, a.icon_url)));
-  renderCategories();
-  renderGrid();
+  // Normalize server fields → client shape used by drawer/install code.
   for (const a of allApps) {
-    fetchReleaseInfo(a).catch(err => console.warn('fetch', a.repo, 'failed:', err));
-  }
-}
-
-async function fetchReleaseInfo(a) {
-  if (!a.repo) { a.available = null; return; }
-  try {
-    const d = await invoke('fetch_release', { repo: a.repo });
-    if (!d || !d.tag_name) { a.available = null; a.has_update = false; renderGrid(); return; }
-    const tag = (d.tag_name || '').replace(/^v/i,'').trim();
-    a.available = tag;
-    a.release_assets = d.assets || [];
-    a.release_url = d.html_url;
-    a.release_stale = !!d._stale;
-    if (a.installed) {
-      const cur = (a.installed||'').split('-')[0];
-      a.has_update = !!(tag && cmpVer(tag, cur) > 0);
+    a.release_assets = a.assets || [];
+    a.release_url    = a.html_url || '';
+    if (a.installed && a.available) {
+      const cur = String(a.installed).split('-')[0];
+      a.has_update = cmpVer(a.available, cur) > 0;
     } else {
       a.has_update = false;
     }
-    renderGrid();
-  } catch (e) {
-    console.warn('fetch_release failed', a.repo, e);
-    a.available = null;
-    a.has_update = false;
   }
+  await Promise.all(allApps.map(a => getIcon(a.icon || a.pkg, a.pkg, a.icon_url)));
+  renderCategories();
+  renderGrid();
 }
 
 function cmpVer(a,b){
@@ -200,10 +188,19 @@ function openDrawer(app) {
 function renderDrawerActions(app) {
   const a = $('#d-actions');
   a.innerHTML = '';
+  const exts = pmInfo.exts || ['.pkg.tar.zst'];
+  const hasCompatible = (app.release_assets || []).some(x => exts.some(e => x.name.endsWith(e)));
+  const pmName = pmInfo.pm || 'pacman';
+
   if (!app.installed) {
-    addBtn(a, 'Instalar', 'primary', () => doInstall(app));
+    if (hasCompatible) {
+      addBtn(a, 'Instalar', 'primary', () => doInstall(app));
+    } else {
+      const b = addBtn(a, `Sin ${exts.join('/')} para ${pmName}`, '', () => {});
+      b.disabled = true; b.title = 'El servidor no publica un paquete compatible con tu sistema (' + pmName + ').';
+    }
   } else if (app.has_update) {
-    addBtn(a, 'Actualizar', 'primary', () => doInstall(app, true));
+    if (hasCompatible) addBtn(a, 'Actualizar', 'primary', () => doInstall(app, true));
     if (!app.self) addBtn(a, 'Abrir', '', () => doLaunch(app));
     if (!app.self) addBtn(a, 'Desinstalar', 'danger', () => doUninstall(app));
   } else {
@@ -265,9 +262,7 @@ async function doInstall(app, isUpdate=false) {
   const exts = pmInfo.exts || ['.pkg.tar.zst'];
   const asset = (app.release_assets || []).find(a => exts.some(e => a.name.endsWith(e)));
   if (!asset) {
-    if (!confirm(`No hay paquete ${exts.join('/')} en la release. ¿Abrir página de GitHub?`)) return;
-    invoke('open_release_page', { repo: app.repo });
-    closeDrawer();
+    toast(`No hay paquete ${exts.join('/')} disponible para esta app.`);
     return;
   }
   const pwd = await promptAuth(
@@ -278,11 +273,16 @@ async function doInstall(app, isUpdate=false) {
   currentOpId = opId;
   setProgress(true, 'Descargando '+asset.name+'…', true);
   startProgressPoll(opId);
+  let stage = 'descarga';
   try {
+    console.log('[install] downloading', asset.browser_download_url);
     const localPath = await invoke('download_pkg', { url: asset.browser_download_url, filename: asset.name, opId });
+    console.log('[install] downloaded to', localPath);
     stopProgressPoll();
-    setProgress(true, 'Instalando…', false);
-    await invoke('install_pkg_file', { path: localPath, password: pwd, opId });
+    setProgress(true, 'Instalando con ' + (pmInfo.pm || 'pm') + '…', false);
+    stage = 'instalación';
+    const out = await invoke('install_pkg_file', { path: localPath, password: pwd, opId });
+    console.log('[install] pm output:', out);
     currentOpId = null;
     if (app.self && isUpdate) {
       toast('Bookos Store actualizada. Reiniciando…');
@@ -296,8 +296,22 @@ async function doInstall(app, isUpdate=false) {
     stopProgressPoll();
     currentOpId = null;
     const msg = typeof e === 'string' ? e : (e.message || JSON.stringify(e));
+    console.error('[install] FAILED in ' + stage + ':', msg);
     if (msg.includes('__cancelled__')) toast('Operación cancelada');
-    else toast('Error: ' + msg.slice(0,140));
+    else {
+      // Show error in a dialog (toast cuts off long messages).
+      const dlg = document.createElement('div');
+      dlg.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);display:flex;align-items:center;justify-content:center;z-index:1000;padding:20px';
+      dlg.innerHTML = `<div style="background:var(--card);border:1px solid var(--brd);border-radius:14px;padding:24px;max-width:600px;width:100%;max-height:80vh;overflow:auto">
+        <h3 style="font-size:16px;font-weight:700;margin-bottom:8px;color:var(--red)">Error en ${stage}</h3>
+        <p style="font-size:13px;color:var(--tx2);margin-bottom:12px">${escapeHtml(asset.name)}</p>
+        <pre style="background:var(--sbg);padding:12px;border-radius:8px;font-family:monospace;font-size:11.5px;white-space:pre-wrap;word-break:break-word;color:var(--tx);max-height:300px;overflow:auto">${escapeHtml(msg)}</pre>
+        <button id="dlg-close" style="margin-top:14px;background:var(--blue);color:#fff;border:0;padding:8px 18px;border-radius:9px;cursor:pointer;font-family:inherit;font-weight:600">Cerrar</button>
+      </div>`;
+      document.body.appendChild(dlg);
+      dlg.querySelector('#dlg-close').addEventListener('click', () => dlg.remove());
+      dlg.addEventListener('click', e => { if (e.target === dlg) dlg.remove(); });
+    }
     setProgress(false);
   }
 }
@@ -434,7 +448,12 @@ function wire() {
   $('#maximize').addEventListener('click', () => tauriWin().toggleMaximize());
   $('#close').addEventListener('click', () => tauriWin().close());
   $('#theme-btn').addEventListener('click', cycleTheme);
-  $('#refresh-btn').addEventListener('click', () => loadApps());
+  $('#refresh-btn').addEventListener('click', async () => {
+    try { await invoke('clear_catalog_cache'); } catch {}
+    iconCache.clear();
+    toast('Refrescando catálogo…');
+    await loadApps();
+  });
   $('#update-all-btn').addEventListener('click', () => doUpdateAll());
   $('#d-cancel-btn').addEventListener('click', () => cancelCurrentOp());
   $('#search').addEventListener('input', () => { renderGrid(); });

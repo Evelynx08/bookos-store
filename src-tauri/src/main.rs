@@ -82,18 +82,38 @@ fn fetch_catalog_cached() -> Vec<serde_json::Value> {
     }
 
     let url = catalog_url();
-    let out = Command::new("curl")
-        .args(["-fsSL", "--max-time", "15",
-               "-H", "Accept: application/json",
-               "-H", "User-Agent: bookos-store"])
-        .arg(&url).output();
+    // Try primary URL; if it fails (e.g. server rewrite not configured), retry
+    // with `.php` suffix directly — keeps client working even with a misconfigured Apache.
+    let fallback_url = if url.ends_with(".json") {
+        Some(format!("{}.php", url))
+    } else { None };
 
-    if let Ok(o) = out {
-        if o.status.success() {
-            let body = String::from_utf8_lossy(&o.stdout).to_string();
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
-                let _ = std::fs::write(&cache_path, &body);
-                return v.get("apps").and_then(|a| a.as_array()).cloned().unwrap_or_default();
+    // Try each URL with strict TLS first; if TLS chain is broken (curl exit 60
+    // = unable to verify cert), retry once with `-k` so the app keeps working
+    // until the server cert is fixed. Set BOOKOS_INSECURE_TLS=1 to skip strict.
+    let insecure_first = std::env::var("BOOKOS_INSECURE_TLS").ok().as_deref() == Some("1");
+    for candidate in std::iter::once(url.as_str()).chain(fallback_url.as_deref()) {
+        for insecure in if insecure_first { [true, false] } else { [false, true] } {
+            let mut cmd = Command::new("curl");
+            cmd.args(["-fsSL", "--max-time", "15",
+                      "-H", "Accept: application/json",
+                      "-H", "User-Agent: bookos-store"]);
+            if insecure { cmd.arg("-k"); }
+            cmd.arg(candidate);
+            let out = cmd.output();
+            if let Ok(o) = out {
+                if o.status.success() {
+                    let body = String::from_utf8_lossy(&o.stdout).to_string();
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+                        let _ = std::fs::write(&cache_path, &body);
+                        eprintln!("[bookos-store] catalog ok from {} (insecure={})", candidate, insecure);
+                        return v.get("apps").and_then(|a| a.as_array()).cloned().unwrap_or_default();
+                    }
+                } else {
+                    eprintln!("[bookos-store] curl {} exit={:?} stderr={}",
+                        candidate, o.status.code(),
+                        String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or(""));
+                }
             }
         }
     }
@@ -112,15 +132,51 @@ fn fetch_catalog_cached() -> Vec<serde_json::Value> {
 enum Pm { Pacman, Dnf, Apt }
 
 fn detect_pm() -> Pm {
+    // Manual override via env (debug / testing).
+    if let Ok(v) = std::env::var("BOOKOS_PM") {
+        match v.to_lowercase().as_str() {
+            "pacman" => return Pm::Pacman,
+            "dnf"    => return Pm::Dnf,
+            "apt"    => return Pm::Apt,
+            _ => {}
+        }
+    }
+    // Prefer /etc/os-release ID over scanning binaries: tools like dpkg/rpm can
+    // be co-installed on Arch (e.g. for build-deps) and would mis-detect.
+    if let Ok(s) = std::fs::read_to_string("/etc/os-release") {
+        let id = s.lines().find_map(|l| l.strip_prefix("ID=")).unwrap_or("").trim_matches('"').to_lowercase();
+        let id_like = s.lines().find_map(|l| l.strip_prefix("ID_LIKE=")).unwrap_or("").trim_matches('"').to_lowercase();
+        let combined = format!("{} {}", id, id_like);
+        if combined.split_whitespace().any(|w| matches!(w, "arch" | "cachyos" | "manjaro" | "endeavouros" | "garuda" | "artix")) {
+            return Pm::Pacman;
+        }
+        if combined.split_whitespace().any(|w| matches!(w, "fedora" | "rhel" | "centos" | "rocky" | "almalinux" | "opensuse" | "suse")) {
+            return Pm::Dnf;
+        }
+        if combined.split_whitespace().any(|w| matches!(w, "debian" | "ubuntu" | "linuxmint" | "pop" | "kali" | "raspbian")) {
+            return Pm::Apt;
+        }
+    }
+    // Fallback: scan binaries, but prefer pacman over dpkg.
     let exists = |p: &str| std::path::Path::new(p).exists();
-    let has = |bin: &str| {
-        exists(&format!("/usr/bin/{}", bin)) || exists(&format!("/bin/{}", bin))
-            || Command::new("which").arg(bin).output()
-                .map(|o| o.status.success()).unwrap_or(false)
-    };
-    if has("dpkg") || has("apt") { Pm::Apt }
+    let has = |bin: &str| exists(&format!("/usr/bin/{}", bin)) || exists(&format!("/bin/{}", bin));
+    if has("pacman") { Pm::Pacman }
     else if has("dnf") || has("rpm") { Pm::Dnf }
+    else if has("dpkg") || has("apt") { Pm::Apt }
     else { Pm::Pacman }
+}
+
+/// Force-clear the local catalog cache so next list_apps does a fresh HTTP fetch.
+/// Called by the Refresh button when admin publishes new versions.
+#[tauri::command]
+fn clear_catalog_cache() -> bool {
+    if let Some(mut p) = dirs::cache_dir() {
+        p.push("bookos-store");
+        p.push("catalog.json");
+        let _ = std::fs::remove_file(&p);
+        return true;
+    }
+    false
 }
 
 #[tauri::command]
@@ -198,22 +254,34 @@ fn open_release_page(repo: String) -> Result<(), String> {
 /// via stdin. If empty, falls back to pkexec. If `op_id` set, registers PID for
 /// cancellation.
 fn run_priv(args: &[&str], password: &str, op_id: Option<&str>) -> Result<String, String> {
+    // Build a clean PATH so spawned sudo/pkexec can find dnf/pacman/apt even
+    // when Tauri launches us with a stripped env (e.g. via .desktop entry).
+    let safe_path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
     if password.is_empty() {
         let bin = if Command::new("which").arg("pkexec").output()
             .map(|o| o.status.success()).unwrap_or(false) { "pkexec" } else { "sudo" };
-        let child = Command::new(bin).args(args)
+        eprintln!("[bookos-store] run_priv (no password) via {}: {:?}", bin, args);
+        let child = Command::new(bin)
+            .env("PATH", safe_path)
+            .args(args)
             .stdout(Stdio::piped()).stderr(Stdio::piped())
             .spawn().map_err(|e| format!("Fallo al lanzar {}: {}", bin, e))?;
         if let Some(id) = op_id { track(id, child.id()); }
         let out = child.wait_with_output().map_err(|e| e.to_string())?;
         if let Some(id) = op_id { untrack(id); }
         if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            return Err(format!("Falló: {}", stderr.lines().last().unwrap_or("error")));
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            let combined = if stderr.trim().is_empty() { stdout } else { stderr };
+            eprintln!("[bookos-store] run_priv (no-pw) failed exit={:?}: {}", out.status.code(), combined);
+            return Err(if combined.trim().is_empty() { format!("fallo sin output (exit {:?})", out.status.code()) } else { combined.trim().to_string() });
         }
         return Ok(String::from_utf8_lossy(&out.stdout).to_string());
     }
+    eprintln!("[bookos-store] run_priv (with sudo password): {:?}", args);
     let mut child = Command::new("sudo")
+        .env("PATH", safe_path)
         .arg("-S").arg("-p").arg("")
         .args(args)
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
@@ -233,7 +301,15 @@ fn run_priv(args: &[&str], password: &str, op_id: Option<&str>) -> Result<String
         if stderr.contains("Terminated") || stderr.contains("signal: 15") {
             return Err("__cancelled__".into());
         }
-        return Err(format!("Falló: {}", stderr.lines().last().unwrap_or(stdout.lines().last().unwrap_or("error"))));
+        // Return full stderr+stdout so frontend dialog shows useful debug.
+        let combined = if stderr.trim().is_empty() { stdout.clone() } else { stderr.clone() };
+        eprintln!("[bookos-store] run_priv failed: exit={:?}\nstderr:\n{}\nstdout:\n{}",
+            out.status.code(), stderr, stdout);
+        return Err(if combined.trim().is_empty() {
+            "Falló sin output".into()
+        } else {
+            combined.trim().to_string()
+        });
     }
     Ok(stdout)
 }
@@ -253,13 +329,41 @@ fn cancel_op(op_id: String) -> bool {
 /// otherwise pkexec (system dialog).
 #[tauri::command]
 async fn install_pkg_file(path: String, password: Option<String>, op_id: Option<String>) -> Result<String, String> {
-    if !std::path::Path::new(&path).exists() {
-        return Err(format!("Archivo no existe: {}", path));
-    }
+    let canon = std::fs::canonicalize(&path)
+        .map_err(|e| format!("Archivo no existe: {} ({})", path, e))?;
+    let canon_str = canon.to_string_lossy().to_string();
+    eprintln!("[bookos-store] install_pkg_file path={}", canon_str);
+    let pm = detect_pm();
+    eprintln!("[bookos-store] detected pm = {:?}", match pm { Pm::Pacman=>"pacman", Pm::Dnf=>"dnf", Pm::Apt=>"apt" });
+    let args: Vec<&str> = match pm {
+        Pm::Pacman => vec!["pacman", "-U", "--noconfirm", &canon_str],
+        Pm::Dnf => vec!["dnf", "install", "-y", "--allowerasing", &canon_str],
+        Pm::Apt => vec!["apt", "install", "-y", "--allow-downgrades", &canon_str],
+    };
+    eprintln!("[bookos-store] running: {:?}", args);
+    run_priv(&args, password.as_deref().unwrap_or(""), op_id.as_deref())
+}
+
+/// Install a package by NAME from configured repos (no file download).
+/// Use when the BookOS dnf repo is configured at /etc/yum.repos.d/bookos.repo.
+/// Falls back gracefully on Apt/Pacman.
+#[tauri::command]
+async fn install_pkg_by_name(pkg: String, password: Option<String>, op_id: Option<String>) -> Result<String, String> {
     let args: Vec<&str> = match detect_pm() {
-        Pm::Pacman => vec!["pacman", "-U", "--noconfirm", &path],
-        Pm::Dnf => vec!["dnf", "install", "-y", &path],
-        Pm::Apt => vec!["apt", "install", "-y", &path],
+        Pm::Pacman => vec!["pacman", "-Sy", "--noconfirm", &pkg],
+        Pm::Dnf => vec!["dnf", "install", "-y", "--refresh", &pkg],
+        Pm::Apt => vec!["apt", "install", "-y", &pkg],
+    };
+    run_priv(&args, password.as_deref().unwrap_or(""), op_id.as_deref())
+}
+
+/// Upgrade all BookOS packages via system repos.
+#[tauri::command]
+async fn upgrade_all(password: Option<String>, op_id: Option<String>) -> Result<String, String> {
+    let args: Vec<&str> = match detect_pm() {
+        Pm::Pacman => vec!["pacman", "-Syu", "--noconfirm"],
+        Pm::Dnf => vec!["dnf", "upgrade", "-y", "--refresh"],
+        Pm::Apt => vec!["sh", "-c", "apt update && apt upgrade -y"],
     };
     run_priv(&args, password.as_deref().unwrap_or(""), op_id.as_deref())
 }
@@ -321,11 +425,13 @@ async fn download_pkg(url: String, filename: String, op_id: Option<String>) -> R
     let dest_clone = dest.clone();
     let op = op_id.clone().unwrap_or_default();
 
-    let mut child = Command::new("curl")
-        .args(["-fSL", "--silent", "-o"])
-        .arg(&dest)
-        .arg(&url)
-        .spawn().map_err(|e| format!("curl falló: {}", e))?;
+    let insecure = url_needs_insecure(&url)
+        || std::env::var("BOOKOS_INSECURE_TLS").ok().as_deref() == Some("1");
+    let mut cmd = Command::new("curl");
+    cmd.args(["-fSL", "--silent"]);
+    if insecure { cmd.arg("-k"); eprintln!("[bookos-store] download_pkg using -k for {}", url); }
+    cmd.arg("-o").arg(&dest).arg(&url);
+    let mut child = cmd.spawn().map_err(|e| format!("curl falló: {}", e))?;
 
     let pid = child.id();
     if let Some(id) = op_id.as_deref() { track(id, pid); }
@@ -390,14 +496,51 @@ async fn fetch_release(repo: String) -> Result<serde_json::Value, String> {
 }
 
 /// HEAD request via curl to discover Content-Length. Returns None on failure.
+/// Tries with TLS verify first, then `-k` (matches catalog fetch behavior).
 fn head_size(url: &str) -> Option<u64> {
-    let out = Command::new("curl")
-        .args(["-sIL", "-o", "/dev/null", "-w", "%{size_download}\n%{header_json}"])
-        .arg(url).output().ok()?;
-    let s = String::from_utf8_lossy(&out.stdout);
-    let v: serde_json::Value = serde_json::from_str(s.lines().nth(1)?).ok()?;
-    let cl = v.get("content-length")?.as_array()?.last()?.as_str()?.parse::<u64>().ok()?;
-    Some(cl)
+    for insecure in [false, true] {
+        let mut cmd = Command::new("curl");
+        cmd.args(["-sIL", "-o", "/dev/null", "-w", "%{size_download}\n%{header_json}"]);
+        if insecure { cmd.arg("-k"); }
+        cmd.arg(url);
+        let out = cmd.output().ok()?;
+        if !out.status.success() { continue; }
+        let s = String::from_utf8_lossy(&out.stdout);
+        if let Some(line) = s.lines().nth(1) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                if let Some(cl) = v.get("content-length")
+                    .and_then(|h| h.as_array())
+                    .and_then(|a| a.last())
+                    .and_then(|x| x.as_str())
+                    .and_then(|s| s.parse::<u64>().ok())
+                {
+                    return Some(cl);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// True if the URL works without TLS verification but not with it
+/// (i.e. server cert is broken/self-signed/expired). Cached after first call.
+fn url_needs_insecure(url: &str) -> bool {
+    use std::sync::OnceLock;
+    static MEMO: OnceLock<std::sync::Mutex<std::collections::HashMap<String, bool>>> = OnceLock::new();
+    let host = url.split('/').nth(2).unwrap_or("").to_string();
+    let memo = MEMO.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    {
+        if let Ok(g) = memo.lock() {
+            if let Some(&v) = g.get(&host) { return v; }
+        }
+    }
+    // Try strict TLS first.
+    let strict_ok = Command::new("curl")
+        .args(["-fsI", "--max-time", "5", "-o", "/dev/null"])
+        .arg(url).status().map(|s| s.success()).unwrap_or(false);
+    let needs = !strict_ok;
+    if let Ok(mut g) = memo.lock() { g.insert(host, needs); }
+    needs
 }
 
 #[tauri::command]
@@ -438,6 +581,7 @@ fn main() {
         .plugin(tauri_plugin_fs::init())
         .invoke_handler(tauri::generate_handler![
             list_apps,
+            clear_catalog_cache,
             is_installed,
             pm_info,
             get_icon,
@@ -445,6 +589,8 @@ fn main() {
             launch_app,
             open_release_page,
             install_pkg_file,
+            install_pkg_by_name,
+            upgrade_all,
             uninstall_pkg,
             download_pkg,
             cancel_op,
