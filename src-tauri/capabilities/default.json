@@ -3,9 +3,6 @@
   "identifier": "default",
   "description": "Default permissions",
   "windows": ["main"],
-  "remote": {
-    "urls": ["http://localhost/*", "http://localhost:*/*"]
-  },
   "permissions": [
     "allow-list-apps",
     "allow-is-installed",

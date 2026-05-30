@@ -1,5 +1,5 @@
 pkgname=bookos-store
-pkgver=0.3.0
+pkgver=0.4.0
 pkgrel=1
 pkgdesc="Tienda de apps para el ecosistema BookOS — instalar, actualizar y desinstalar"
 arch=('x86_64')

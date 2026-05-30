@@ -567,16 +567,7 @@ fn detect_system_theme() -> String {
 }
 
 fn main() {
-    const PREFERRED_PORT: u16 = 17842;
-    let port = if portpicker::is_free_tcp(PREFERRED_PORT) {
-        PREFERRED_PORT
-    } else {
-        portpicker::pick_unused_port().unwrap_or(1431)
-    };
-    let url = format!("http://localhost:{}", port).parse().unwrap();
-
     tauri::Builder::default()
-        .plugin(tauri_plugin_localhost::Builder::new(port).build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .invoke_handler(tauri::generate_handler![
@@ -598,9 +589,9 @@ fn main() {
             fetch_release,
             detect_system_theme,
         ])
-        .setup(move |app| {
+        .setup(|app| {
             use tauri::{WebviewWindowBuilder, WebviewUrl};
-            let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
+            let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title("Bookos Store")
                 .inner_size(960.0, 680.0)
                 .min_inner_size(640.0, 480.0)
