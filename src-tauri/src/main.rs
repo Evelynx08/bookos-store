@@ -192,27 +192,53 @@ fn list_apps() -> serde_json::Value {
     serde_json::json!(enriched)
 }
 
+/// Sentinel returned when the app binary exists on disk but the package manager
+/// has no record of it (installed via AppImage, manual copy, or a different
+/// package name). Treated as "installed, unknown version" by the frontend so it
+/// always offers a clean reinstall to register it properly.
+const MANUAL_VER: &str = "manual";
+
 fn pkg_version(pm: Pm, pkg: &str) -> Option<String> {
-    match pm {
+    let from_pm = match pm {
         Pm::Pacman => {
-            let out = Command::new("pacman").args(["-Q", pkg]).output().ok()?;
-            if !out.status.success() { return None; }
-            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            s.split_whitespace().nth(1).map(|v| v.to_string())
+            Command::new("pacman").args(["-Q", pkg]).output().ok()
+                .filter(|o| o.status.success())
+                .and_then(|o| {
+                    let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                    s.split_whitespace().nth(1).map(|v| v.to_string())
+                })
         }
         Pm::Dnf => {
-            let out = Command::new("rpm").args(["-q", "--qf", "%{VERSION}-%{RELEASE}", pkg]).output().ok()?;
-            if !out.status.success() { return None; }
-            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if s.is_empty() || s.contains("not installed") { None } else { Some(s) }
+            // Exit code is the source of truth: 0 = installed, nonzero = not.
+            // A real version starts with a digit — guards against localized
+            // error text ("no está instalado") leaking into stdout.
+            Command::new("rpm")
+                .args(["-q", "--qf", "%{VERSION}-%{RELEASE}", pkg])
+                .output().ok()
+                .filter(|o| o.status.success())
+                .and_then(|o| {
+                    let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                    if s.is_empty() || !s.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+                        None
+                    } else { Some(s) }
+                })
         }
         Pm::Apt => {
-            let out = Command::new("dpkg-query").args(["-W", "-f=${Version}", pkg]).output().ok()?;
-            if !out.status.success() { return None; }
-            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if s.is_empty() { None } else { Some(s) }
+            Command::new("dpkg-query").args(["-W", "-f=${Version}", pkg]).output().ok()
+                .filter(|o| o.status.success())
+                .and_then(|o| {
+                    let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                    if s.is_empty() { None } else { Some(s) }
+                })
         }
-    }
+    };
+    if from_pm.is_some() { return from_pm; }
+
+    // Fallback: binary present but not tracked by the package manager.
+    let bin_exists = ["/usr/bin", "/usr/local/bin", "/bin"]
+        .iter()
+        .any(|d| std::path::Path::new(&format!("{}/{}", d, pkg)).exists());
+    if bin_exists { Some(MANUAL_VER.to_string()) } else { None }
 }
 
 #[tauri::command]
@@ -230,8 +256,21 @@ fn pm_info() -> serde_json::Value {
     }
 }
 
+/// Nombre de paquete plausible: alfanumérico + separadores habituales, sin
+/// empezar por '-' (inyectaría flags en pacman/dnf/apt, que corren como root)
+/// y sin '/' (launch_app no debe ejecutar rutas arbitrarias).
+fn valid_pkg_name(p: &str) -> bool {
+    !p.is_empty()
+        && p.len() <= 128
+        && !p.starts_with('-')
+        && p.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+' | '@' | ':'))
+}
+
 #[tauri::command]
 fn launch_app(pkg: String) -> Result<(), String> {
+    if !valid_pkg_name(&pkg) {
+        return Err(format!("Nombre de paquete inválido: {}", pkg));
+    }
     // Tauri-built apps install their binary at /usr/bin/<pkgname>
     Command::new(&pkg).spawn().map(|_| ())
         .map_err(|e| format!("No se pudo lanzar {}: {}", pkg, e))
@@ -349,6 +388,9 @@ async fn install_pkg_file(path: String, password: Option<String>, op_id: Option<
 /// Falls back gracefully on Apt/Pacman.
 #[tauri::command]
 async fn install_pkg_by_name(pkg: String, password: Option<String>, op_id: Option<String>) -> Result<String, String> {
+    if !valid_pkg_name(&pkg) {
+        return Err(format!("Nombre de paquete inválido: {}", pkg));
+    }
     let args: Vec<&str> = match detect_pm() {
         Pm::Pacman => vec!["pacman", "-Sy", "--noconfirm", &pkg],
         Pm::Dnf => vec!["dnf", "install", "-y", "--refresh", &pkg],
@@ -371,6 +413,9 @@ async fn upgrade_all(password: Option<String>, op_id: Option<String>) -> Result<
 /// Uninstall a package via pacman -Rs or dnf remove.
 #[tauri::command]
 async fn uninstall_pkg(pkg: String, password: Option<String>, op_id: Option<String>) -> Result<String, String> {
+    if !valid_pkg_name(&pkg) {
+        return Err(format!("Nombre de paquete inválido: {}", pkg));
+    }
     let args: Vec<&str> = match detect_pm() {
         Pm::Pacman => vec!["pacman", "-Rs", "--noconfirm", &pkg],
         Pm::Dnf => vec!["dnf", "remove", "-y", &pkg],

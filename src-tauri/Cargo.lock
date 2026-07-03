@@ -144,7 +144,7 @@ dependencies = [
 
 [[package]]
 name = "bookos-store"
-version = "0.4.0"
+version = "0.6.0"
 dependencies = [
  "base64 0.22.1",
  "dirs 5.0.1",

@@ -118,7 +118,8 @@ async function loadApps() {
   for (const a of allApps) {
     a.release_assets = a.assets || [];
     a.release_url    = a.html_url || '';
-    if (a.installed && a.available) {
+    a.manual = a.installed === 'manual';  // binary present, not tracked by pm
+    if (a.installed && a.available && !a.manual) {
       const cur = String(a.installed).split('-')[0];
       a.has_update = cmpVer(a.available, cur) > 0;
     } else {
@@ -186,6 +187,8 @@ function renderGrid() {
     const hasCompat = (a.release_assets || []).some(x => assetCompat(x, pmName));
     const status = a.has_update
       ? `<span class="app-status update"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></svg>${i18n('update')}</span>`
+      : a.manual
+        ? `<span class="app-status installed" style="opacity:.85"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>${i18n('installed')}</span>`
       : a.installed
         ? `<span class="app-status installed"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>${i18n('installed')}</span>`
         : hasCompat
@@ -258,17 +261,24 @@ function renderDetail() {
   const pmName = pmInfo.pm || 'pacman';
   const hasCompat = (a.release_assets || []).some(x => assetCompat(x, pmName));
 
-  const verLine = a.installed
-    ? i18n('detail.installedAt', { v: String(a.installed).split('-')[0] }) +
-      (a.available && cmpVer(a.available, String(a.installed).split('-')[0]) > 0
-        ? ' · ' + i18n('detail.latest', { v: a.available }) : '')
-    : (a.available ? i18n('detail.latest', { v: a.available }) : i18n('detail.notInstalled'));
+  const verLine = a.manual
+    ? i18n('detail.installedManual') + (a.available ? ' · ' + i18n('detail.latest', { v: a.available }) : '')
+    : a.installed
+      ? i18n('detail.installedAt', { v: String(a.installed).split('-')[0] }) +
+        (a.available && cmpVer(a.available, String(a.installed).split('-')[0]) > 0
+          ? ' · ' + i18n('detail.latest', { v: a.available }) : '')
+      : (a.available ? i18n('detail.latest', { v: a.available }) : i18n('detail.notInstalled'));
 
   // Action buttons
   let actionsHtml = '';
   if (!a.installed) {
     if (hasCompat) actionsHtml = `<button class="detail-action primary" data-act="install">${svgIcon('download')}${i18n('install')}</button>`;
     else actionsHtml = `<button class="detail-action" disabled title="${escapeHtml(i18n('detail.noCompat', { pm: pmName }))}">${i18n('detail.noPkg', { pm: pmName })}</button>`;
+  } else if (a.manual) {
+    // Binary present but not tracked by pm. Offer to register it (install via
+    // the package manager so future updates work), plus launch.
+    if (hasCompat) actionsHtml += `<button class="detail-action primary" data-act="install" title="${escapeHtml(i18n('detail.registerHint'))}">${svgIcon('download')}${i18n('detail.register')}</button>`;
+    if (!a.self) actionsHtml += `<button class="detail-action" data-act="launch">${svgIcon('play')}${i18n('open')}</button>`;
   } else {
     if (a.has_update && hasCompat) actionsHtml += `<button class="detail-action primary" data-act="update">${svgIcon('refresh')}${i18n('update')}</button>`;
     if (!a.self) actionsHtml += `<button class="detail-action" data-act="launch">${svgIcon('play')}${i18n('open')}</button>`;

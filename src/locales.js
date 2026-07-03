@@ -37,6 +37,7 @@ window.BOOKOS_I18N = {
     "langToast":"Idioma: {l}","lang.es":"Español","lang.en":"English","lang.auto":"Auto",
     // Detail view
     "detail.installedAt":"Instalada: {v}","detail.latest":"Última: {v}","detail.notInstalled":"No instalada",
+    "detail.installedManual":"Instalada (sin registrar)","detail.register":"Registrar","detail.registerHint":"Reinstala via gestor de paquetes para recibir actualizaciones",
     "detail.upToDate":"Al día","detail.noCompat":"Sin paquete compatible con {pm}","detail.noPkg":"Sin paquete para {pm}",
     "detail.about":"Acerca de","detail.whatsNew":"Novedades","detail.openHomepage":"Abrir página web",
     "detail.noDesc":"Sin descripción.","detail.noNotes":"Sin notas de versión.",
@@ -80,6 +81,7 @@ window.BOOKOS_I18N = {
     "langToast":"Language: {l}","lang.es":"Español","lang.en":"English","lang.auto":"Auto",
     // Detail view
     "detail.installedAt":"Installed: {v}","detail.latest":"Latest: {v}","detail.notInstalled":"Not installed",
+    "detail.installedManual":"Installed (unregistered)","detail.register":"Register","detail.registerHint":"Reinstall via package manager to get updates",
     "detail.upToDate":"Up to date","detail.noCompat":"No package compatible with {pm}","detail.noPkg":"No {pm} package",
     "detail.about":"About","detail.whatsNew":"What's new","detail.openHomepage":"Open homepage",
     "detail.noDesc":"No description.","detail.noNotes":"No release notes.",
