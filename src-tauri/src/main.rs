@@ -464,14 +464,24 @@ async fn download_pkg(url: String, filename: String, op_id: Option<String>) -> R
     let mut dest = dirs::cache_dir().ok_or_else(|| "no cache dir".to_string())?;
     dest.push("bookos-store");
     std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
-    dest.push(&filename);
+
+    // `filename` viene del catálogo remoto (asset.name), no es de confianza.
+    // Aceptar solo un basename limpio para que la escritura no pueda salir de
+    // ~/.cache/bookos-store/ (evita path traversal / escritura arbitraria).
+    let safe_name = std::path::Path::new(&filename)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| *n == filename && !n.is_empty() && *n != "." && *n != "..")
+        .ok_or_else(|| format!("nombre de archivo inválido: {}", filename))?;
+    dest.push(safe_name);
 
     let total = head_size(&url).unwrap_or(0);
     let dest_clone = dest.clone();
     let op = op_id.clone().unwrap_or_default();
 
-    let insecure = url_needs_insecure(&url)
-        || std::env::var("BOOKOS_INSECURE_TLS").ok().as_deref() == Some("1");
+    // No degradar TLS automáticamente: solo aceptar certificados inválidos con
+    // opt-in explícito por variable de entorno (nunca de forma silenciosa/memoizada).
+    let insecure = std::env::var("BOOKOS_INSECURE_TLS").ok().as_deref() == Some("1");
     let mut cmd = Command::new("curl");
     cmd.args(["-fSL", "--silent"]);
     if insecure { cmd.arg("-k"); eprintln!("[bookos-store] download_pkg using -k for {}", url); }
@@ -567,26 +577,6 @@ fn head_size(url: &str) -> Option<u64> {
     None
 }
 
-/// True if the URL works without TLS verification but not with it
-/// (i.e. server cert is broken/self-signed/expired). Cached after first call.
-fn url_needs_insecure(url: &str) -> bool {
-    use std::sync::OnceLock;
-    static MEMO: OnceLock<std::sync::Mutex<std::collections::HashMap<String, bool>>> = OnceLock::new();
-    let host = url.split('/').nth(2).unwrap_or("").to_string();
-    let memo = MEMO.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-    {
-        if let Ok(g) = memo.lock() {
-            if let Some(&v) = g.get(&host) { return v; }
-        }
-    }
-    // Try strict TLS first.
-    let strict_ok = Command::new("curl")
-        .args(["-fsI", "--max-time", "5", "-o", "/dev/null"])
-        .arg(url).status().map(|s| s.success()).unwrap_or(false);
-    let needs = !strict_ok;
-    if let Ok(mut g) = memo.lock() { g.insert(host, needs); }
-    needs
-}
 
 #[tauri::command]
 fn detect_system_theme() -> String {

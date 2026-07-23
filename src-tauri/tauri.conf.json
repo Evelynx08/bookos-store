@@ -12,8 +12,7 @@
   "app": {
     "withGlobalTauri": true,
     "security": {
-      "csp": null,
-      "dangerousDisableAssetCspModification": true
+      "csp": "default-src 'self' 'unsafe-inline' asset: http://asset.localhost https://asset.localhost; img-src 'self' asset: http://asset.localhost https://asset.localhost data: blob:; style-src 'self' 'unsafe-inline'"
     },
     "windows": []
   },
