@@ -183,13 +183,51 @@ fn clear_catalog_cache() -> bool {
 fn list_apps() -> serde_json::Value {
     let pm = detect_pm();
     let apps = fetch_catalog_cached();
+    // Una sola consulta al gestor de paquetes para todo el catálogo. Antes se
+    // lanzaba un proceso por app, en serie, y la rejilla no se pintaba hasta
+    // que terminaban los ~30 fork+exec.
+    let installed_map = installed_versions(pm);
     let enriched: Vec<serde_json::Value> = apps.into_iter().map(|mut a| {
         let pkg = a["pkg"].as_str().unwrap_or("").to_string();
-        let installed = pkg_version(pm, &pkg);
+        let installed = lookup_installed(&installed_map, &pkg);
         a["installed"] = serde_json::json!(installed);
         a
     }).collect();
     serde_json::json!(enriched)
+}
+
+/// Volcado completo de paquetes instalados → `{nombre: versión}`, en **una**
+/// invocación del gestor. Listar todo y filtrar en memoria sale más barato que
+/// preguntar paquete a paquete, y evita las rarezas de código de salida que
+/// tiene `pacman -Q` cuando alguno de los nombres no está instalado.
+fn installed_versions(pm: Pm) -> HashMap<String, String> {
+    let out = match pm {
+        Pm::Pacman => Command::new("pacman").arg("-Q").output(),
+        Pm::Dnf    => Command::new("rpm").args(["-qa", "--qf", "%{NAME} %{VERSION}-%{RELEASE}\n"]).output(),
+        Pm::Apt    => Command::new("dpkg-query").args(["-W", "-f=${Package} ${Version}\n"]).output(),
+    };
+    let mut map = HashMap::new();
+    if let Ok(o) = out {
+        if o.status.success() {
+            for line in String::from_utf8_lossy(&o.stdout).lines() {
+                let mut it = line.split_whitespace();
+                if let (Some(name), Some(ver)) = (it.next(), it.next()) {
+                    map.insert(name.to_string(), ver.to_string());
+                }
+            }
+        }
+    }
+    map
+}
+
+/// Versión instalada de `pkg` según el volcado, con el mismo respaldo que antes:
+/// si el gestor no lo conoce pero el binario está en disco, se marca `manual`.
+fn lookup_installed(map: &HashMap<String, String>, pkg: &str) -> Option<String> {
+    if let Some(v) = map.get(pkg) { return Some(v.clone()); }
+    let bin_exists = ["/usr/bin", "/usr/local/bin", "/bin"]
+        .iter()
+        .any(|d| std::path::Path::new(&format!("{}/{}", d, pkg)).exists());
+    if bin_exists { Some(MANUAL_VER.to_string()) } else { None }
 }
 
 /// Sentinel returned when the app binary exists on disk but the package manager
@@ -457,10 +495,46 @@ fn get_icon(name: String) -> String {
     String::new()
 }
 
+/// Comprueba el sha256 del archivo descargado contra el que publica el catálogo.
+/// Falla cerrado: si no coincide, el llamante borra el archivo y no se instala.
+///
+/// Esto detecta corrupción y manipulación en tránsito, pero no protege contra un
+/// servidor comprometido (el hash viaja por el mismo canal que el paquete). La
+/// defensa real es firmar los paquetes con la clave GPG de release, que ya existe
+/// pero que hoy solo se aplica a las ISO.
+fn verify_sha256(path: &std::path::Path, expected: &str) -> Result<(), String> {
+    let expected = expected.trim().to_lowercase();
+    if expected.len() != 64 || !expected.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("El catálogo no trae un sha256 válido para este paquete.".into());
+    }
+    let out = Command::new("sha256sum")
+        .arg(path)
+        .output()
+        .map_err(|e| format!("No se pudo calcular el hash del paquete: {}", e))?;
+    if !out.status.success() {
+        return Err("No se pudo calcular el hash del paquete.".into());
+    }
+    let got = String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+    if got != expected {
+        return Err(format!(
+            "El paquete descargado no coincide con el catálogo (sha256 esperado {}…, obtenido {}…). \
+             Se ha descartado la descarga.",
+            &expected[..12],
+            if got.len() >= 12 { &got[..12] } else { "desconocido" }
+        ));
+    }
+    Ok(())
+}
+
 /// Download asset to ~/.cache/bookos-store/. Writes progress to OPS map for
 /// frontend to poll via `progress(op_id)`. Cancellable via cancel_op(op_id).
+/// El paquete se verifica contra el sha256 del catálogo antes de devolverlo.
 #[tauri::command]
-async fn download_pkg(url: String, filename: String, op_id: Option<String>) -> Result<String, String> {
+async fn download_pkg(url: String, filename: String, sha256: Option<String>, op_id: Option<String>) -> Result<String, String> {
     let mut dest = dirs::cache_dir().ok_or_else(|| "no cache dir".to_string())?;
     dest.push("bookos-store");
     std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
@@ -515,6 +589,19 @@ async fn download_pkg(url: String, filename: String, op_id: Option<String>) -> R
         if status.code().is_none() { return Err("__cancelled__".into()); }
         return Err(format!("Descarga falló (exit {})", status.code().unwrap_or(-1)));
     }
+    // Integridad antes de entregar la ruta: si el paquete no es el que el
+    // catálogo dice, se borra y no llega nunca al instalador privilegiado.
+    if let Some(exp) = sha256.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Err(e) = verify_sha256(&dest, exp) {
+            let _ = std::fs::remove_file(&dest);
+            if let Some(id) = op_id.as_deref() { untrack(id); }
+            eprintln!("[bookos-store] verificación sha256 fallida para {}: {}", safe_name, e);
+            return Err(e);
+        }
+    } else {
+        eprintln!("[bookos-store] AVISO: el catálogo no trae sha256 para {}, se instala sin verificar", safe_name);
+    }
+
     let final_size = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
     if !op.is_empty() { set_progress(&op, 100.0, final_size, if total>0 { total } else { final_size }); }
     if let Some(id) = op_id.as_deref() { untrack(id); }
@@ -606,6 +693,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .invoke_handler(tauri::generate_handler![
+            bookos_palette_css,
             list_apps,
             clear_catalog_cache,
             is_installed,
@@ -642,3 +730,16 @@ fn main() {
         .run(tauri::generate_context!())
         .expect("error while running app");
 }
+
+// ── Color dinámico ───────────────────────────────────────────────────────
+// La paleta la genera BookOS Settings desde el fondo de pantalla y la deja en
+// ~/.config/bookos/palette.css. Aquí solo se lee: quien tiñe es la hoja, que
+// el cliente bookos-palette.js inyecta al final de <head>.
+#[tauri::command]
+fn bookos_palette_css() -> String {
+    std::env::var("HOME").ok()
+        .map(|h| std::path::Path::new(&h).join(".config/bookos/palette.css"))
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .unwrap_or_default()
+}
+

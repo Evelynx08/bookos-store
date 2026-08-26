@@ -522,7 +522,7 @@ async function doInstall(app, isUpdate=false) {
   startProgressPoll(opId);
   let stage = i18n('stage.download');
   try {
-    const localPath = await invoke('download_pkg', { url: asset.browser_download_url, filename: asset.name, opId });
+    const localPath = await invoke('download_pkg', { url: asset.browser_download_url, filename: asset.name, sha256: asset.sha256 || null, opId });
     stopProgressPoll();
     setProgress(true, i18n('installingWith', { pm: pmInfo.pm || 'pm' }), false);
     stage = i18n('stage.install');
@@ -610,7 +610,7 @@ async function doUpdateAll() {
     setProgress(true, i18n('downloadingFile', { f: asset.name }), true);
     startProgressPoll(opId);
     try {
-      const localPath = await invoke('download_pkg', { url: asset.browser_download_url, filename: asset.name, opId });
+      const localPath = await invoke('download_pkg', { url: asset.browser_download_url, filename: asset.name, sha256: asset.sha256 || null, opId });
       stopProgressPoll();
       setProgress(true, i18n('installingApp', { app: getLabel(app) }), false);
       await invoke('install_pkg_file', { path: localPath, password: pwd, opId });
