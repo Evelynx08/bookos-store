@@ -88,32 +88,31 @@ fn fetch_catalog_cached() -> Vec<serde_json::Value> {
         Some(format!("{}.php", url))
     } else { None };
 
-    // Try each URL with strict TLS first; if TLS chain is broken (curl exit 60
-    // = unable to verify cert), retry once with `-k` so the app keeps working
-    // until the server cert is fixed. Set BOOKOS_INSECURE_TLS=1 to skip strict.
-    let insecure_first = std::env::var("BOOKOS_INSECURE_TLS").ok().as_deref() == Some("1");
+    // Nunca se degrada TLS por cuenta propia: el catálogo decide qué URL y qué
+    // sha256 llegan al instalador privilegiado, así que un reintento con `-k`
+    // ante un certificado inválido entregaba ambos a quien estuviera en medio.
+    // `-k` solo con opt-in explícito (BOOKOS_INSECURE_TLS=1), como download_pkg.
+    let insecure = std::env::var("BOOKOS_INSECURE_TLS").ok().as_deref() == Some("1");
     for candidate in std::iter::once(url.as_str()).chain(fallback_url.as_deref()) {
-        for insecure in if insecure_first { [true, false] } else { [false, true] } {
-            let mut cmd = Command::new("curl");
-            cmd.args(["-fsSL", "--max-time", "15",
-                      "-H", "Accept: application/json",
-                      "-H", "User-Agent: bookos-store"]);
-            if insecure { cmd.arg("-k"); }
-            cmd.arg(candidate);
-            let out = cmd.output();
-            if let Ok(o) = out {
-                if o.status.success() {
-                    let body = String::from_utf8_lossy(&o.stdout).to_string();
-                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
-                        let _ = std::fs::write(&cache_path, &body);
-                        eprintln!("[bookos-store] catalog ok from {} (insecure={})", candidate, insecure);
-                        return v.get("apps").and_then(|a| a.as_array()).cloned().unwrap_or_default();
-                    }
-                } else {
-                    eprintln!("[bookos-store] curl {} exit={:?} stderr={}",
-                        candidate, o.status.code(),
-                        String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or(""));
+        let mut cmd = Command::new("curl");
+        cmd.args(["-fsSL", "--max-time", "15",
+                  "-H", "Accept: application/json",
+                  "-H", "User-Agent: bookos-store"]);
+        if insecure { cmd.arg("-k"); }
+        cmd.arg(candidate);
+        let out = cmd.output();
+        if let Ok(o) = out {
+            if o.status.success() {
+                let body = String::from_utf8_lossy(&o.stdout).to_string();
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+                    let _ = std::fs::write(&cache_path, &body);
+                    eprintln!("[bookos-store] catalog ok from {} (insecure={})", candidate, insecure);
+                    return v.get("apps").and_then(|a| a.as_array()).cloned().unwrap_or_default();
                 }
+            } else {
+                eprintln!("[bookos-store] curl {} exit={:?} stderr={}",
+                    candidate, o.status.code(),
+                    String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or(""));
             }
         }
     }
@@ -591,15 +590,17 @@ async fn download_pkg(url: String, filename: String, sha256: Option<String>, op_
     }
     // Integridad antes de entregar la ruta: si el paquete no es el que el
     // catálogo dice, se borra y no llega nunca al instalador privilegiado.
-    if let Some(exp) = sha256.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        if let Err(e) = verify_sha256(&dest, exp) {
-            let _ = std::fs::remove_file(&dest);
-            if let Some(id) = op_id.as_deref() { untrack(id); }
-            eprintln!("[bookos-store] verificación sha256 fallida para {}: {}", safe_name, e);
-            return Err(e);
-        }
-    } else {
-        eprintln!("[bookos-store] AVISO: el catálogo no trae sha256 para {}, se instala sin verificar", safe_name);
+    // Sin sha256 no hay nada que comparar, y el paquete iría igual a root:
+    // se rechaza en vez de instalarlo a ciegas.
+    let verified = match sha256.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(exp) => verify_sha256(&dest, exp),
+        None => Err(format!("El catálogo no trae sha256 para {}; no se instala sin verificar", safe_name)),
+    };
+    if let Err(e) = verified {
+        let _ = std::fs::remove_file(&dest);
+        if let Some(id) = op_id.as_deref() { untrack(id); }
+        eprintln!("[bookos-store] verificación sha256 fallida para {}: {}", safe_name, e);
+        return Err(e);
     }
 
     let final_size = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
@@ -638,35 +639,67 @@ async fn fetch_release(repo: String) -> Result<serde_json::Value, String> {
 }
 
 /// HEAD request via curl to discover Content-Length. Returns None on failure.
-/// Tries with TLS verify first, then `-k` (matches catalog fetch behavior).
 fn head_size(url: &str) -> Option<u64> {
-    for insecure in [false, true] {
-        let mut cmd = Command::new("curl");
-        cmd.args(["-sIL", "-o", "/dev/null", "-w", "%{size_download}\n%{header_json}"]);
-        if insecure { cmd.arg("-k"); }
-        cmd.arg(url);
-        let out = cmd.output().ok()?;
-        if !out.status.success() { continue; }
-        let s = String::from_utf8_lossy(&out.stdout);
-        if let Some(line) = s.lines().nth(1) {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-                if let Some(cl) = v.get("content-length")
-                    .and_then(|h| h.as_array())
-                    .and_then(|a| a.last())
-                    .and_then(|x| x.as_str())
-                    .and_then(|s| s.parse::<u64>().ok())
-                {
-                    return Some(cl);
-                }
-            }
-        }
-    }
-    None
+    let insecure = std::env::var("BOOKOS_INSECURE_TLS").ok().as_deref() == Some("1");
+    let mut cmd = Command::new("curl");
+    cmd.args(["-sIL", "-o", "/dev/null", "-w", "%{size_download}\n%{header_json}"]);
+    if insecure { cmd.arg("-k"); }
+    cmd.arg(url);
+    let out = cmd.output().ok()?;
+    if !out.status.success() { return None; }
+    let s = String::from_utf8_lossy(&out.stdout);
+    let line = s.lines().nth(1)?;
+    let v = serde_json::from_str::<serde_json::Value>(line).ok()?;
+    v.get("content-length")
+        .and_then(|h| h.as_array())
+        .and_then(|a| a.last())
+        .and_then(|x| x.as_str())
+        .and_then(|s| s.parse::<u64>().ok())
 }
 
 
+/// El tema del escritorio, preguntado al portal XDG.
+///
+/// Va **antes** que `kreadconfig6`: esa orden solo sabe de Plasma y lee el
+/// `kdeglobals` del usuario, que en una sesión BookOS no lo escribe nadie —el
+/// tema se elige en la tarjeta de Apariencia y vive en `panel.conf`—, así que
+/// la app se quedaba con el tema con el que se instaló el sistema. El portal
+/// lo sirve la sesión que esté corriendo: BookOS desde el propio compositor,
+/// y Plasma y GNOME también, de modo que esto funciona en las tres.
+///
+/// `color-scheme`: 1 oscuro, 2 claro, 0 sin preferencia. `gdbus` viene con
+/// GLib, que ya es dependencia de cualquier app Tauri: no añade nada.
+fn portal_color_scheme() -> Option<String> {
+    let salida = std::process::Command::new("gdbus")
+        .args([
+            "call",
+            "--session",
+            "--dest",
+            "org.freedesktop.portal.Desktop",
+            "--object-path",
+            "/org/freedesktop/portal/desktop",
+            "--method",
+            "org.freedesktop.portal.Settings.ReadOne",
+            "org.freedesktop.appearance",
+            "color-scheme",
+        ])
+        .output()
+        .ok()?;
+    // Contesta «(<uint32 1>,)»; el 0 es «sin preferencia» y no es respuesta.
+    let texto = String::from_utf8_lossy(&salida.stdout);
+    let n = texto.split("uint32").nth(1)?.trim_start().chars().next()?;
+    match n {
+        '1' => Some("dark".to_string()),
+        '2' => Some("light".to_string()),
+        _ => None,
+    }
+}
+
 #[tauri::command]
 fn detect_system_theme() -> String {
+    if let Some(tema) = portal_color_scheme() {
+        return tema;
+    }
     let kde = [
         ("kreadconfig6", &["--group", "General", "--key", "ColorScheme"][..]),
         ("kreadconfig5", &["--group", "General", "--key", "ColorScheme"][..]),
@@ -688,8 +721,37 @@ fn detect_system_theme() -> String {
     "auto".into()
 }
 
+/// Quita el zoom de página que WebKitGTK hace con el pellizco del touchpad.
+///
+/// No hay ajuste para eso ni en WebKit ni en Tauri, y la página no se entera:
+/// el pellizco lo consume un `GtkGestureZoom` de la propia vista y llega como
+/// `setMagnification`, no como `wheel` ni `touch*`, así que ningún
+/// `preventDefault` lo frena. Se apaga ese gesto y ningún otro: con fase `None`
+/// GTK deja de pasarle eventos (gtkeventcontroller.c, 3.24). Va en
+/// `on_page_load` para cubrir también las ventanas que se abran después.
+fn desactivar_zoom_por_pellizco<R: tauri::Runtime>(
+    webview: &tauri::Webview<R>,
+    _: &tauri::webview::PageLoadPayload<'_>,
+) {
+    #[cfg(target_os = "linux")]
+    let _ = webview.with_webview(|webview| {
+        use gtk::glib::translate::from_glib_none;
+        use gtk::prelude::*;
+
+        // WebKitGTK guarda ahí el gesto (WebKitWebViewBase.cpp, 2.52.5). No es
+        // API pública: si la clave cambia, no se encuentra y el zoom vuelve.
+        // Lo guardado es un puntero C a un GObject, no un tipo de Rust.
+        let Some(gesto) = (unsafe { webview.inner().data::<gtk::ffi::GtkGesture>("wk-view-zoom-gesture") }) else {
+            return;
+        };
+        let gesto: gtk::Gesture = unsafe { from_glib_none(gesto.as_ptr()) };
+        gesto.set_propagation_phase(gtk::PropagationPhase::None);
+    });
+}
+
 fn main() {
     tauri::Builder::default()
+        .on_page_load(desactivar_zoom_por_pellizco)
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .invoke_handler(tauri::generate_handler![

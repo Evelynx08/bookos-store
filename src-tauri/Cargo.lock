@@ -144,10 +144,11 @@ dependencies = [
 
 [[package]]
 name = "bookos-store"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "base64 0.22.1",
  "dirs 5.0.1",
+ "gtk",
  "once_cell",
  "serde",
  "serde_json",

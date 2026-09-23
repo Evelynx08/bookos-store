@@ -24,7 +24,9 @@
   function apply() {
     document.querySelectorAll("[data-i18n]").forEach(el => { el.textContent = t(el.dataset.i18n); });
     document.querySelectorAll("[data-i18n-html]").forEach(el => { el.innerHTML = t(el.dataset.i18nHtml); });
-    document.querySelectorAll("[data-i18n-title]").forEach(el => { el.title = t(el.dataset.i18nTitle); el.setAttribute("aria-label", t(el.dataset.i18nTitle)); });
+    // :not(body): en <body> la clave es el título del documento (abajo). Como
+    // atributo `title` salía de ayuda emergente en cualquier hueco de la ventana.
+    document.querySelectorAll("[data-i18n-title]:not(body)").forEach(el => { el.title = t(el.dataset.i18nTitle); el.setAttribute("aria-label", t(el.dataset.i18nTitle)); });
     document.querySelectorAll("[data-i18n-ph]").forEach(el => { el.placeholder = t(el.dataset.i18nPh); });
     const titleKey = document.querySelector("body")?.dataset?.i18nTitle;
     if (titleKey) document.title = t(titleKey);
